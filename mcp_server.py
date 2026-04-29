@@ -22,7 +22,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from mcp.server.fastmcp import FastMCP
 
-from protocol import DEFAULT_SOCKET_PATH, DEFAULT_TIMEOUT_MS, make_ok, send_request
+import os
+
+from protocol import DEFAULT_SOCKET_PATH as _DEFAULT_SOCKET_PATH, DEFAULT_TIMEOUT_MS, make_ok, send_request
+
+# Allow test harness (and systemd overrides) to redirect the socket path
+DEFAULT_SOCKET_PATH = os.environ.get("AWTO_SOCKET", _DEFAULT_SOCKET_PATH)
+
+
+def _sock_path() -> str:
+    """Return socket path, honouring AWTO_SOCKET env var at call time."""
+    return os.environ.get("AWTO_SOCKET", _DEFAULT_SOCKET_PATH)
 
 # ---------------------------------------------------------------------------
 # Logging  (syslog via /dev/log + stderr fallback)
@@ -55,7 +65,7 @@ log = logging.getLogger("mcp")
 
 mcp = FastMCP(
     "awto-serial",
-    description="Persistent ASCII serial interface for embedded devices.",
+    instructions="Persistent ASCII serial interface for embedded devices.",
 )
 
 # ---------------------------------------------------------------------------
@@ -68,13 +78,15 @@ def _daemon_query(req: dict) -> str:
     Raises RuntimeError on daemon / serial errors so Copilot gets a clear
     error message rather than a raw exception traceback.
     """
+    # Read at call time so test/override via os.environ["AWTO_SOCKET"] is honoured
+    sock_path = os.environ.get("AWTO_SOCKET", _DEFAULT_SOCKET_PATH)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.connect(DEFAULT_SOCKET_PATH)
+            sock.connect(sock_path)
             resp = send_request(sock, req)
     except FileNotFoundError:
         raise RuntimeError(
-            f"daemon socket not found at {DEFAULT_SOCKET_PATH}. "
+            f"daemon socket not found at {sock_path}. "
             "Start the daemon first:  python serial_daemon.py"
         )
     except ConnectionRefusedError:
@@ -126,6 +138,106 @@ def serial_ping() -> str:
     except RuntimeError as exc:
         log.warning("ping failed: %s", exc)
         return f"error: {exc}"
+
+
+@mcp.tool()
+def serial_set_baud(baud: int) -> str:
+    """Set the serial port baud rate live (e.g. 2480000).
+
+    The change applies to all subsequent queries until changed again or
+    the daemon restarts. Use this when you already know the device's baud
+    rate; otherwise prefer ``serial_detect_baud``.
+
+    Returns:
+        'ok (baud=N)' on success, or an error message.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(sock, {"cmd": "set_baud", "baud": int(baud)})
+        if not resp.get("ok"):
+            return f"error: {resp.get('error', 'unknown')}"
+        return f"ok (baud={resp.get('baud')})"
+    except OSError as exc:
+        return f"error: {exc}"
+
+
+@mcp.tool()
+def serial_set_eol(eol: str) -> str:
+    """Set the line ending used for outgoing commands.
+
+    Args:
+        eol: One of 'lf', 'cr', 'crlf' (matches tio --map convention).
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(sock, {"cmd": "set_eol", "eol": eol})
+        if not resp.get("ok"):
+            return f"error: {resp.get('error', 'unknown')}"
+        return f"ok (eol={resp.get('eol')})"
+    except OSError as exc:
+        return f"error: {exc}"
+
+
+@mcp.tool()
+def serial_detect_baud(probe: str = "?", timeout_ms: int = 200) -> str:
+    """Auto-detect the device's baud rate by probing fastest-first.
+
+    The daemon sends ``probe`` at each candidate rate (2_480_000 → 9600)
+    and selects the first rate that returns valid printable ASCII.
+    On success the daemon's active baud rate is updated.
+
+    Returns:
+        'detected baud=N' or an error message.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(
+                sock,
+                {"cmd": "detect_baud", "probe": probe, "timeout_ms": int(timeout_ms)},
+            )
+        if not resp.get("ok"):
+            return f"error: {resp.get('error', 'unknown')}"
+        return f"detected baud={resp.get('baud')}"
+    except OSError as exc:
+        return f"error: {exc}"
+
+
+@mcp.tool()
+def serial_detect_eol(probe: str = "?", timeout_ms: int = 500) -> str:
+    """Auto-detect the device's line ending (LF / CR / CRLF).
+
+    On success the daemon's active EOL is updated so subsequent
+    ``serial_query`` calls use the correct terminator.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(
+                sock,
+                {"cmd": "detect_eol", "probe": probe, "timeout_ms": int(timeout_ms)},
+            )
+        if not resp.get("ok"):
+            return f"error: {resp.get('error', 'unknown')}"
+        return f"detected eol={resp.get('eol')}"
+    except OSError as exc:
+        return f"error: {exc}"
+
+
+@mcp.tool()
+def serial_info() -> dict:
+    """Return current daemon state: port, baud, eol, is_open."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(sock, {"cmd": "info"})
+        if not resp.get("ok"):
+            return {"error": resp.get("error", "unknown")}
+        return resp.get("info", {})
+    except OSError as exc:
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
