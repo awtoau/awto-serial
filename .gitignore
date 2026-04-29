@@ -1,0 +1,5 @@
+.venv-ft/
+.venv/
+__pycache__/
+*.pyc
+/tmp/awto*.sock

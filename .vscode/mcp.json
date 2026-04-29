@@ -1,0 +1,10 @@
+{
+    "servers": {
+        "awto-serial": {
+            "type": "stdio",
+            "command": "/usr/bin/python3.14t",
+            "args": ["${workspaceFolder}/mcp_server.py"],
+            "env": {}
+        }
+    }
+}
