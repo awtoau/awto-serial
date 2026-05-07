@@ -22,11 +22,15 @@ Requires the free-threaded (no-GIL) CPython build: python3.14t
 """
 
 import argparse
+import atexit
+import json
 import logging
 import logging.handlers
+import readline
 import socket
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -106,6 +110,159 @@ def _print_response(resp: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Monitor mode helpers
+# ---------------------------------------------------------------------------
+
+_HISTORY_FILE = Path("~/.ttu_history").expanduser()
+
+
+def _load_completion_tree(
+    complete_cmd: str,
+    complete_file: Optional[str],
+    timeout_ms: int,
+) -> dict:
+    """Return the parsed completion schema dict from file or device query."""
+    if complete_file:
+        try:
+            with open(complete_file) as fh:
+                return json.load(fh)
+        except Exception as exc:
+            print(f"warning: could not load completion file: {exc}", file=sys.stderr)
+            return {}
+
+    resp = _call({"cmd": "query", "line": complete_cmd, "timeout_ms": timeout_ms})
+    if not resp.get("ok"):
+        print(f"warning: completion fetch failed: {resp.get('error')}", file=sys.stderr)
+        return {}
+    raw = resp.get("response", "").strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"warning: completion JSON parse error: {exc}", file=sys.stderr)
+        return {}
+
+
+def _build_completer(tree: dict):
+    """Return a readline-compatible tab-completer for the given schema tree."""
+
+    def _index(commands: list) -> dict:
+        return {
+            c["name"]: {
+                "desc": c.get("description", ""),
+                "args": c.get("args", []),
+                "sub": _index(c.get("subcommands", [])),
+            }
+            for c in commands
+            if "name" in c
+        }
+
+    root = _index(tree.get("commands", []))
+    _matches: list[str] = []
+
+    def completer(text: str, state: int) -> Optional[str]:
+        if state == 0:
+            line = readline.get_line_buffer()
+            begidx = readline.get_begidx()
+            before_tokens = line[:begidx].split()
+
+            # Walk the command tree with before_tokens to find what comes next.
+            node = root
+            args_of_cmd: list = []
+            arg_start_idx = 0
+
+            i = 0
+            while i < len(before_tokens):
+                tok = before_tokens[i]
+                if tok in node:
+                    entry = node[tok]
+                    if entry["sub"]:
+                        node = entry["sub"]
+                        i += 1
+                        arg_start_idx = i
+                    else:
+                        # Leaf command — remaining tokens are positional args.
+                        args_of_cmd = entry["args"]
+                        arg_start_idx = i + 1
+                        i += 1
+                        node = {}
+                        break
+                else:
+                    node = {}
+                    args_of_cmd = []
+                    break
+
+            if args_of_cmd:
+                n_args_typed = len(before_tokens) - arg_start_idx
+                if n_args_typed < len(args_of_cmd):
+                    choices = args_of_cmd[n_args_typed].get("choices", [])
+                    _matches[:] = [c + " " for c in choices if c.startswith(text)]
+                else:
+                    _matches[:] = []
+            else:
+                _matches[:] = [k + " " for k in node if k.startswith(text)]
+
+        return _matches[state] if state < len(_matches) else None
+
+    return completer
+
+
+def _run_monitor(args) -> None:
+    """Interactive readline REPL with device-supplied tab-completion."""
+    tree = _load_completion_tree(
+        complete_cmd=args.complete_cmd,
+        complete_file=args.complete_file,
+        timeout_ms=args.timeout,
+    )
+
+    device_name = tree.get("name", "device")
+
+    # Set up tab completion.
+    readline.set_completer(_build_completer(tree))
+    readline.parse_and_bind("tab: complete")
+    readline.set_completer_delims(" \t")
+
+    # Persistent history.
+    try:
+        readline.read_history_file(_HISTORY_FILE)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(1000)
+    atexit.register(readline.write_history_file, _HISTORY_FILE)
+
+    cmds = [c["name"] for c in tree.get("commands", [])]
+    print(f"awto monitor  [{device_name}]  — Tab to complete, Ctrl-D to exit")
+    if cmds:
+        print(f"Commands: {', '.join(cmds)}")
+    print()
+
+    prompt = f"{device_name}> "
+    while True:
+        try:
+            line = input(prompt).strip()
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            print()
+            continue
+
+        if not line:
+            continue
+
+        resp = _call({"cmd": "query", "line": line, "timeout_ms": args.timeout})
+        if resp.get("ok"):
+            if resp.get("warning"):
+                print(f"[warn: {resp['warning']}]", file=sys.stderr)
+            response = resp.get("response", "")
+            if response:
+                print(response)
+        else:
+            print(f"error: {resp.get('error', 'unknown')}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -180,6 +337,20 @@ def main() -> None:
     sp_pl.add_argument("line", choices=["dtr", "rts"])
     sp_pl.add_argument("--duration", type=int, default=100, metavar="MS",
                        help="pulse duration in ms (default 100)")
+
+    sp_mon = sub.add_parser("monitor", help="interactive REPL with tab-completion")
+    sp_mon.add_argument(
+        "--complete-cmd",
+        default="help --json",
+        metavar="CMD",
+        help="command sent to device to fetch completion JSON (default: 'help --json')",
+    )
+    sp_mon.add_argument(
+        "--complete-file",
+        default=None,
+        metavar="PATH",
+        help="load completion JSON from file instead of querying device",
+    )
 
     # Back-compat: ``ttu_cli.py "status"`` with no subcommand → query
     args, leftover = ap.parse_known_args()
@@ -266,6 +437,9 @@ def main() -> None:
         resp = _call({"cmd": "send_break", "duration_ms": args.duration})
     elif args.subcmd == "pulse-line":
         resp = _call({"cmd": "pulse_line", "line": args.line, "duration_ms": args.duration})
+    elif args.subcmd == "monitor":
+        _run_monitor(args)
+        sys.exit(0)
     elif args.subcmd == "query":
         text = args.text
         if text is None:
