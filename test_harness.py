@@ -104,6 +104,9 @@ def _make_worker_with_mock(responses: list[bytes]) -> SerialWorker:
     worker._history_lock = threading.Lock()
     worker._rx_thread = None
     worker._rx_stop = threading.Event()
+    worker._drain_buffer = bytearray()
+    worker._drain_limit = 64 * 1024
+    worker._drain_condition = threading.Condition()
     worker._reconnecting = False
     worker._reconnect_lock = threading.Lock()
     worker._echo = False
@@ -259,6 +262,18 @@ class TestSerialWorker(unittest.TestCase):
         out = worker.query_full("status", 100)
         self.assertEqual(out["response"], "status\nOK 42")
 
+    def test_drain_returns_and_clears_buffer(self):
+        worker = self._worker()
+        worker._record_rx_line("alpha", "t0")
+        worker._record_rx_line("beta", "t1")
+        self.assertEqual(worker.drain(), "alpha\nbeta\n")
+        self.assertEqual(worker.drain(), "")
+
+    def test_read_until_matches_buffered_text(self):
+        worker = self._worker()
+        worker._record_rx_line("status ok", "t0")
+        self.assertEqual(worker.read_until(r"status\s+ok", 20), "status ok")
+
     def test_concurrent_queries_serialised(self):
         """Multiple threads calling query() must not interleave."""
         N = 20
@@ -375,6 +390,9 @@ class TestIntegration(unittest.TestCase):
         self._worker._history_lock = threading.Lock()
         self._worker._rx_thread = None
         self._worker._rx_stop = threading.Event()
+        self._worker._drain_buffer = bytearray()
+        self._worker._drain_limit = 64 * 1024
+        self._worker._drain_condition = threading.Condition()
         self._worker._reconnecting = False
         self._worker._reconnect_lock = threading.Lock()
         self._worker._echo = False
@@ -457,6 +475,18 @@ class TestIntegration(unittest.TestCase):
         )
         self.assertTrue(resp["ok"])
         self.assertEqual(resp["response"], "73 74 61 74 75 73\n4f 4b 20 73 74 61 74 75 73 0a")
+
+    def test_drain_and_read_until(self):
+        self._worker._record_rx_line("boot complete", "t0")
+        resp = _client_query(self._tmp, {"cmd": "read_until", "pattern": "boot complete", "timeout_ms": 50})
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["response"], "boot complete")
+        resp = _client_query(self._tmp, {"cmd": "drain"})
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["response"], "boot complete\n")
+        resp = _client_query(self._tmp, {"cmd": "drain"})
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["response"], "")
 
     def test_unknown_cmd(self):
         resp = _client_query(self._tmp, {"cmd": "explode"})
@@ -561,6 +591,9 @@ class TestDetection(unittest.TestCase):
         worker._history_lock = threading.Lock()
         worker._rx_thread = None
         worker._rx_stop = threading.Event()
+        worker._drain_buffer = bytearray()
+        worker._drain_limit = 64 * 1024
+        worker._drain_condition = threading.Condition()
         worker._reconnecting = False
         worker._reconnect_lock = threading.Lock()
         worker._echo = False
@@ -639,6 +672,9 @@ class TestDetection(unittest.TestCase):
         worker._history_lock = threading.Lock()
         worker._rx_thread = None
         worker._rx_stop = threading.Event()
+        worker._drain_buffer = bytearray()
+        worker._drain_limit = 64 * 1024
+        worker._drain_condition = threading.Condition()
         worker._reconnecting = False
         worker._reconnect_lock = threading.Lock()
         worker._echo = False
@@ -713,6 +749,9 @@ class TestMapLogTimestamp(unittest.TestCase):
         w._history_lock = threading.Lock()
         w._rx_thread = None
         w._rx_stop = threading.Event()
+        w._drain_buffer = bytearray()
+        w._drain_limit = 64 * 1024
+        w._drain_condition = threading.Condition()
         w._reconnecting = False
         w._reconnect_lock = threading.Lock()
         w._echo = False
@@ -881,6 +920,9 @@ class TestMcpClientEndToEnd(unittest.TestCase):
         worker._history_lock = threading.Lock()
         worker._rx_thread = None
         worker._rx_stop = threading.Event()
+        worker._drain_buffer = bytearray()
+        worker._drain_limit = 64 * 1024
+        worker._drain_condition = threading.Condition()
         worker._reconnecting = False
         worker._reconnect_lock = threading.Lock()
         worker._echo = False

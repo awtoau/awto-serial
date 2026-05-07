@@ -82,6 +82,8 @@ Options:
 | `serial_list_ports` | — | List all serial ports with VID:PID, description |
 | `serial_stats` | — | RX/TX byte counters, error count, uptime |
 | `serial_history` | `limit`, `offset` | Recent RX lines from ring buffer (newest first) |
+| `serial_read_until` | `pattern`, `timeout_ms` | Wait for unsolicited RX text matching a regex |
+| `serial_drain` | `max_bytes` | Drain buffered unsolicited RX text |
 | `serial_set_line` | `line`, `state` | Set DTR or RTS: `high` / `low` / `toggle` |
 | `serial_send_break` | `duration_ms` | Send serial BREAK condition |
 | `serial_pulse_line` | `line`, `duration_ms` | Pulse DTR or RTS (assert → wait → release) |
@@ -127,6 +129,8 @@ New subcommands:
 .venv-ft/bin/python ttu_cli.py stats
 .venv-ft/bin/python ttu_cli.py history --limit 20
 .venv-ft/bin/python ttu_cli.py history --limit 50 --offset 50   # pagination
+.venv-ft/bin/python ttu_cli.py read-until "boot complete"
+.venv-ft/bin/python ttu_cli.py drain
 .venv-ft/bin/python ttu_cli.py set-line dtr high
 .venv-ft/bin/python ttu_cli.py set-line rts toggle
 .venv-ft/bin/python ttu_cli.py send-break --duration 500

@@ -413,6 +413,37 @@ def serial_history(limit: int = 50, offset: int = 0) -> dict:
 
 
 @mcp.tool()
+def serial_read_until(pattern: str, timeout_ms: int = 500) -> str:
+    """Wait until unsolicited RX text matches a regex pattern and return the matched text."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(sock, {"cmd": "read_until", "pattern": pattern, "timeout_ms": timeout_ms})
+        if not resp.get("ok"):
+            return f"error: {resp.get('error', 'unknown')}"
+        return resp.get("response", "")
+    except OSError as exc:
+        return f"error: {exc}"
+
+
+@mcp.tool()
+def serial_drain(max_bytes: int = 0) -> str:
+    """Return buffered unsolicited RX text since the last drain and clear it."""
+    try:
+        req = {"cmd": "drain"}
+        if max_bytes > 0:
+            req["max_bytes"] = max_bytes
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(sock, req)
+        if not resp.get("ok"):
+            return f"error: {resp.get('error', 'unknown')}"
+        return resp.get("response", "")
+    except OSError as exc:
+        return f"error: {exc}"
+
+
+@mcp.tool()
 def serial_set_line(line: str, state: str) -> str:
     """Set DTR or RTS control line high, low, or toggle.
 

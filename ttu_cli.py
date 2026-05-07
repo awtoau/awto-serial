@@ -328,6 +328,12 @@ def main() -> None:
     sp_hist.add_argument("--limit", type=int, default=50, help="max lines (default 50)")
     sp_hist.add_argument("--offset", type=int, default=0, help="skip N lines from newest")
 
+    sp_ru = sub.add_parser("read-until", help="wait for unsolicited RX text matching a regex")
+    sp_ru.add_argument("pattern", help="Python regex pattern to wait for")
+
+    sp_drain = sub.add_parser("drain", help="drain unsolicited RX buffer")
+    sp_drain.add_argument("--max-bytes", type=int, default=0, help="max bytes to return (0 = all)")
+
     sub.add_parser("list-ports", help="list available serial ports")
 
     sp_sl = sub.add_parser("set-line", help="set DTR or RTS line state")
@@ -423,6 +429,13 @@ def main() -> None:
         else:
             print(f"error: {resp.get('error', 'unknown')}", file=sys.stderr)
             sys.exit(1)
+    elif args.subcmd == "read-until":
+        resp = _call({"cmd": "read_until", "pattern": args.pattern, "timeout_ms": args.timeout})
+    elif args.subcmd == "drain":
+        req = {"cmd": "drain"}
+        if args.max_bytes > 0:
+            req["max_bytes"] = args.max_bytes
+        resp = _call(req)
     elif args.subcmd == "list-ports":
         resp = _call({"cmd": "list_ports"})
         if resp.get("ok"):

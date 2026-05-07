@@ -117,6 +117,9 @@ class SerialWorker:
         self._history_lock = threading.Lock()
         self._rx_thread: threading.Thread | None = None
         self._rx_stop = threading.Event()
+        self._drain_buffer = bytearray()
+        self._drain_limit = 64 * 1024
+        self._drain_condition = threading.Condition()
 
         # Auto-reconnect state
         self._reconnecting = False
@@ -526,6 +529,41 @@ class SerialWorker:
         page = items[offset: offset + limit]
         return {"lines": page, "total": total, "offset": offset}
 
+    def read_until(self, pattern: str, timeout_ms: int = 500) -> str:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        regex = re.compile(pattern)
+        with self._drain_condition:
+            while True:
+                text = self._drain_buffer.decode(errors="replace")
+                match = regex.search(text)
+                if match:
+                    return match.group(0)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"read_until timeout waiting for pattern: {pattern}")
+                self._drain_condition.wait(timeout=remaining)
+
+    def drain(self, max_bytes: int | None = None) -> str:
+        with self._drain_condition:
+            if max_bytes is None or max_bytes >= len(self._drain_buffer):
+                data = bytes(self._drain_buffer)
+                self._drain_buffer.clear()
+            else:
+                data = bytes(self._drain_buffer[:max_bytes])
+                del self._drain_buffer[:max_bytes]
+        return data.decode(errors="replace")
+
+    def _record_rx_line(self, text: str, ts: str) -> None:
+        entry = {"ts": ts, "line": text}
+        with self._history_lock:
+            self._history.append(entry)
+        with self._drain_condition:
+            self._drain_buffer.extend((text + "\n").encode())
+            if len(self._drain_buffer) > self._drain_limit:
+                del self._drain_buffer[:len(self._drain_buffer) - self._drain_limit]
+            self._drain_condition.notify_all()
+        self._log_line(text)
+
     # ------------------------------------------------------------------
     # DTR / RTS / BREAK
     # ------------------------------------------------------------------
@@ -640,10 +678,7 @@ class SerialWorker:
                             if text:
                                 ts = (self._format_ts_for(self._ts_format)
                                       or datetime.datetime.now().isoformat(timespec="milliseconds"))
-                                entry = {"ts": ts, "line": text}
-                                with self._history_lock:
-                                    self._history.append(entry)
-                                self._log_line(text)
+                                self._record_rx_line(text, ts)
                             break
                     else:
                         break
@@ -860,6 +895,26 @@ def handle_client(conn: socket.socket, addr: str, worker: SerialWorker) -> None:
                     limit = int(req.get("limit", 50))
                     offset = int(req.get("offset", 0))
                     _send(conn, {"ok": True, **worker.history(limit, offset)})
+
+                elif cmd == "read_until":
+                    try:
+                        pattern = str(req.get("pattern", ""))
+                        timeout_ms = int(req.get("timeout_ms", 500))
+                        if not pattern:
+                            _send(conn, make_err("read_until: pattern required"))
+                        else:
+                            match_text = worker.read_until(pattern, timeout_ms)
+                            _send(conn, {"ok": True, "response": match_text})
+                    except (ValueError, TimeoutError, re.error) as exc:
+                        _send(conn, make_err(f"read_until: {exc}"))
+
+                elif cmd == "drain":
+                    max_bytes = req.get("max_bytes")
+                    try:
+                        limit = int(max_bytes) if max_bytes is not None else None
+                        _send(conn, {"ok": True, "response": worker.drain(limit)})
+                    except ValueError as exc:
+                        _send(conn, make_err(f"drain: {exc}"))
 
                 elif cmd == "list_ports":
                     _send(conn, {"ok": True, "ports": _list_ports()})
