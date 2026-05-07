@@ -115,6 +115,7 @@ send a break
 .venv-ft/bin/python ttu_cli.py log-start /tmp/awto-rx.log --strip --timestamp 24hour
 .venv-ft/bin/python ttu_cli.py log-stop
 echo "status" | .venv-ft/bin/python ttu_cli.py query   # pipe from stdin
+```
 
 New subcommands:
 

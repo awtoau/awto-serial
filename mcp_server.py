@@ -456,13 +456,6 @@ def serial_pulse_line(line: str, duration_ms: int = 100) -> str:
         return f"error: {exc}"
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    mcp.run()
-
 @mcp.tool()
 def serial_completion_schema() -> dict:
     """Return the JSON schema a device firmware should implement for monitor tab-completion.
