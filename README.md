@@ -176,7 +176,15 @@ Call the `serial_completion_schema` MCP tool from your agent to get the exact JS
 
 ## Monitor Mode & Tab-Completion Schema
 
-The `monitor` subcommand (coming soon) provides an interactive readline REPL over the serial port.  On startup it sends a command to the device (default: `help --json`) and expects a JSON response that drives bash-style tab-completion.
+The `monitor` subcommand provides an interactive readline REPL over the serial port. On startup it sends a command to the device (default: `help --json`) and expects a JSON response that drives bash-style tab-completion.
+
+Run it with:
+
+```bash
+python ttu_cli.py monitor
+python ttu_cli.py monitor --complete-cmd "? --json"
+python ttu_cli.py monitor --complete-file docs/completion-schema.json
+```
 
 ### Completion JSON format
 

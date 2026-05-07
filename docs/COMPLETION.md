@@ -197,16 +197,14 @@ Once your device responds to `help --json`, the monitor mode picks it up automat
 
 ```bash
 # Start monitor (fetches completion JSON from device at startup)
-.venv-ft/bin/python ttu_cli.py monitor --port /dev/ttyACM0
+python ttu_cli.py monitor
 
 # Override the command the host sends to fetch completion data
-.venv-ft/bin/python ttu_cli.py monitor --complete-cmd "? --json"
+python ttu_cli.py monitor --complete-cmd "? --json"
 
 # Or load completion from a local file (no device query)
-.venv-ft/bin/python ttu_cli.py monitor --complete-file my-device.json
+python ttu_cli.py monitor --complete-file my-device.json
 ```
-
-> **Note:** `ttu_cli.py monitor` is not yet implemented. These flags define the planned interface. Track progress in the repo issues.
 
 ---
 
