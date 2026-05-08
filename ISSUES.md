@@ -1,4 +1,7 @@
-# awto-mcp-serial — Issue Backlog
+# awto-mcp — Issue Backlog
+
+Canonical repository: `awto-au/awto-mcp`.
+Historical references to `awto-mcp-serial` may still appear in notes and scripts; `gh` resolves that alias to `awto-au/awto-mcp`.
 
 Priority key (this is an MCP automation tool, not a human terminal):
 - **P0** critical / blocks basic usefulness

@@ -323,7 +323,13 @@ def serial_set_echo(enabled: bool = False) -> str:
 
 
 @mcp.tool()
-def serial_log_start(path: str, append: bool = True, strip: bool = False) -> str:
+def serial_log_start(
+    path: str,
+    append: bool = True,
+    strip: bool = False,
+    max_bytes: int = 0,
+    backups: int = 0,
+) -> str:
     """Start logging all received serial data to a file.
 
     The file is ALWAYS appended — it is never overwritten or deleted.
@@ -331,14 +337,29 @@ def serial_log_start(path: str, append: bool = True, strip: bool = False) -> str
         path: Absolute path to the log file.
         append: Accepted for compatibility; ignored (always append-only).
         strip: Strip ANSI/control chars before writing log lines.
+        max_bytes: Rotate when active log exceeds this size in bytes (0 disables).
+        backups: Number of rotated generations to keep.
     """
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.connect(_sock_path())
-            resp = send_request(sock, {"cmd": "log_start", "path": path, "strip": strip})
+            resp = send_request(
+                sock,
+                {
+                    "cmd": "log_start",
+                    "path": path,
+                    "strip": strip,
+                    "max_bytes": max_bytes,
+                    "backups": backups,
+                },
+            )
         if not resp.get("ok"):
             return f"error: {resp.get('error', 'unknown')}"
-        return f"ok (logging to {resp.get('log_path')}, append-only, strip={resp.get('log_strip')})"
+        return (
+            f"ok (logging to {resp.get('log_path')}, append-only, "
+            f"strip={resp.get('log_strip')}, max_bytes={resp.get('max_bytes', 0)}, "
+            f"backups={resp.get('backups', 0)})"
+        )
     except OSError as exc:
         return f"error: {exc}"
 

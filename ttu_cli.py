@@ -309,6 +309,10 @@ def main() -> None:
     sp_ls.add_argument("path", help="log file path")
     sp_ls.add_argument("--strip", action="store_true",
                        help="strip ANSI/control chars before logging")
+    sp_ls.add_argument("--max-bytes", type=int, default=0,
+                       help="rotate when active log exceeds this many bytes (0 disables)")
+    sp_ls.add_argument("--backups", type=int, default=0,
+                       help="number of rotated log generations to keep")
     sp_ls.add_argument("--timestamp", choices=["iso8601", "24hour", "epoch"],
                        help="also set timestamp format")
 
@@ -397,7 +401,15 @@ def main() -> None:
     elif args.subcmd == "set-map":
         resp = _call({"cmd": "set_map", "maps": args.maps})
     elif args.subcmd == "log-start":
-        resp = _call({"cmd": "log_start", "path": args.path, "strip": args.strip})
+        resp = _call(
+            {
+                "cmd": "log_start",
+                "path": args.path,
+                "strip": args.strip,
+                "max_bytes": args.max_bytes,
+                "backups": args.backups,
+            }
+        )
         if resp.get("ok") and getattr(args, "timestamp", None):
             ts_resp = _call({"cmd": "set_timestamp", "format": args.timestamp})
             if not ts_resp.get("ok"):

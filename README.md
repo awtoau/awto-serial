@@ -1,6 +1,9 @@
-# awto-mcp-serial
+# awto-mcp
 
 MCP serial daemon for VS Code Copilot — baud/EOL auto-detection, Unix socket IPC, FastMCP tools.
+
+Canonical repository: `awto-au/awto-mcp`.
+Some historical references use `awto-mcp-serial`; in `gh` CLI this resolves to the canonical `awto-au/awto-mcp` repo.
 
 Lets GitHub Copilot (or any MCP client) send commands to a serial device and read responses, with automatic baud-rate and line-ending detection.
 
@@ -34,8 +37,8 @@ VS Code Copilot
 ### Install
 
 ```bash
-git clone https://github.com/awto-au/awto-mcp-serial
-cd awto-mcp-serial
+git clone https://github.com/awto-au/awto-mcp
+cd awto-mcp
 uv venv --python python3.14t .venv-ft
 uv pip install -e . --python .venv-ft/bin/python
 ```
@@ -77,7 +80,7 @@ Options:
 | `serial_detect_eol` | `probe`, `timeout_ms` | Auto-detect line ending |
 | `serial_set_echo` | `enabled` | Enable or disable local echo of transmitted commands |
 | `serial_set_timestamp` | `format` | Set timestamp format: `iso8601` / `24hour` / `epoch` |
-| `serial_log_start` | `path`, `strip` | Start append-only RX logging (optional ANSI/control stripping) |
+| `serial_log_start` | `path`, `strip`, `max_bytes`, `backups` | Start append-only RX logging with optional size-based rotation |
 | `serial_log_stop` | — | Stop RX logging |
 | `serial_list_ports` | — | List all serial ports with VID:PID, description |
 | `serial_stats` | — | RX/TX byte counters, error count, uptime |
@@ -118,6 +121,7 @@ send a break
 .venv-ft/bin/python ttu_cli.py set-echo on
 .venv-ft/bin/python ttu_cli.py set-timestamp iso8601
 .venv-ft/bin/python ttu_cli.py log-start /tmp/awto-rx.log --strip --timestamp 24hour
+.venv-ft/bin/python ttu_cli.py log-start /tmp/awto-rx.log --max-bytes 1048576 --backups 3
 .venv-ft/bin/python ttu_cli.py log-stop
 echo "status" | .venv-ft/bin/python ttu_cli.py query   # pipe from stdin
 ```
@@ -139,6 +143,25 @@ New subcommands:
 
 ---
 
+## Long-Running Tasks (Agent Workflow)
+
+For long jobs (large ingests, long test runs, large builds), prefer a visible log/tail pattern so humans can watch progress live:
+
+1. Run the long command with output redirected to a log file.
+2. Open a visible terminal with `tail -F` on that log.
+3. Let the agent monitor completion separately.
+
+Example:
+
+```bash
+your_command > "$HOME/.cache/awto-mcp/job.log" 2>&1
+tail -F "$HOME/.cache/awto-mcp/job.log"
+```
+
+This keeps progress visible even when the command is started from an MCP/agent workflow.
+
+---
+
 ## For AI Agents on Other Projects
 
 If you are a Copilot agent working on a project that talks to a serial device (e.g. embedded firmware), you can use this MCP server to interact with the device directly from your workspace.
@@ -146,7 +169,7 @@ If you are a Copilot agent working on a project that talks to a serial device (e
 ### 1 — Start the daemon (human does this once)
 
 ```bash
-cd /path/to/awto-mcp-serial
+cd /path/to/awto-mcp
 source .venv-ft/bin/activate
 python serial_daemon.py --port /dev/ttyACM0 --baud 2480000
 ```
@@ -158,8 +181,8 @@ python serial_daemon.py --port /dev/ttyACM0 --baud 2480000
      "servers": {
           "awto-serial": {
                "type": "stdio",
-               "command": "/path/to/awto-mcp-serial/.venv-ft/bin/python",
-               "args": ["/path/to/awto-mcp-serial/mcp_server.py"]
+               "command": "/path/to/awto-mcp/.venv-ft/bin/python",
+               "args": ["/path/to/awto-mcp/mcp_server.py"]
           }
      }
 }

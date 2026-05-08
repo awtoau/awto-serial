@@ -102,6 +102,8 @@ class SerialWorker:
         self._log_file = None
         self._log_lock = threading.Lock()
         self._log_strip = False
+        self._log_max_bytes = 0
+        self._log_backups = 0
         self._ts_format: str | None = None
         self._echo = False
 
@@ -424,15 +426,26 @@ class SerialWorker:
             raise ValueError("timestamp format must be iso8601, 24hour, epoch or empty")
         return fmt
 
-    def log_start(self, path: str) -> None:
-        """Open log file in append mode. The file is never overwritten or deleted."""
+    def log_start(self, path: str, max_bytes: int = 0, backups: int = 0) -> None:
+        """Open log file in append mode with optional size-based rotation."""
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be >= 0")
+        if backups < 0:
+            raise ValueError("backups must be >= 0")
         with self._log_lock:
             if self._log_file is not None:
                 self._log_file.flush()
                 self._log_file.close()
             self._log_path = path
+            self._log_max_bytes = int(max_bytes)
+            self._log_backups = int(backups)
             self._log_file = open(path, "a", encoding="utf-8", errors="replace")  # noqa: SIM115
-            log.info("log started: %s", path)
+            log.info(
+                "log started: %s (rotation: max_bytes=%d backups=%d)",
+                path,
+                self._log_max_bytes,
+                self._log_backups,
+            )
 
     def set_log_strip(self, enabled: bool) -> None:
         """Enable or disable ANSI/control-character stripping for log writes."""
@@ -496,10 +509,48 @@ class SerialWorker:
                     payload = self._strip_for_log(line) if self._log_strip else line
                     ts = self._format_ts()
                     prefix = f"[{ts}] " if ts else ""
-                    self._log_file.write(prefix + payload + "\n")
+                    msg = prefix + payload + "\n"
+                    self._rotate_log_if_needed(len(msg.encode("utf-8", errors="replace")))
+                    self._log_file.write(msg)
                     self._log_file.flush()
                 except OSError as exc:
                     log.warning("log write failed: %s", exc)
+
+    def _rotate_log_if_needed(self, incoming_size: int) -> None:
+        """Rotate active log file on write boundaries when size threshold is reached."""
+        if self._log_file is None or not self._log_path:
+            return
+        if self._log_max_bytes <= 0:
+            return
+
+        try:
+            current_size = os.path.getsize(self._log_path)
+        except OSError:
+            current_size = 0
+
+        if current_size + incoming_size <= self._log_max_bytes:
+            return
+
+        self._log_file.flush()
+        self._log_file.close()
+        self._log_file = None
+
+        if self._log_backups > 0:
+            for idx in range(self._log_backups, 0, -1):
+                src = f"{self._log_path}.{idx}"
+                dst = f"{self._log_path}.{idx + 1}"
+                if os.path.exists(src):
+                    if idx == self._log_backups:
+                        os.unlink(src)
+                    else:
+                        os.replace(src, dst)
+            if os.path.exists(self._log_path):
+                os.replace(self._log_path, f"{self._log_path}.1")
+        else:
+            if os.path.exists(self._log_path):
+                os.unlink(self._log_path)
+
+        self._log_file = open(self._log_path, "a", encoding="utf-8", errors="replace")  # noqa: SIM115
 
     def ping(self) -> bool:
         if self._ser is None:
@@ -874,14 +925,25 @@ def handle_client(conn: socket.socket, addr: str, worker: SerialWorker) -> None:
                 elif cmd == "log_start":
                     path = req.get("path", "")
                     strip = bool(req.get("strip", False))
+                    max_bytes = int(req.get("max_bytes", 0))
+                    backups = int(req.get("backups", 0))
                     if not path:
                         _send(conn, make_err("log_start: path required"))
                     else:
                         try:
                             worker.set_log_strip(strip)
-                            worker.log_start(path)
-                            _send(conn, {"ok": True, "log_path": path, "log_strip": strip})
-                        except OSError as exc:
+                            worker.log_start(path, max_bytes=max_bytes, backups=backups)
+                            _send(
+                                conn,
+                                {
+                                    "ok": True,
+                                    "log_path": path,
+                                    "log_strip": strip,
+                                    "max_bytes": max_bytes,
+                                    "backups": backups,
+                                },
+                            )
+                        except (OSError, ValueError) as exc:
                             _send(conn, make_err(f"log_start: {exc}"))
 
                 elif cmd == "log_stop":
@@ -1005,6 +1067,10 @@ def main() -> None:
                     help="comma-separated char maps: INLCRNL,ICRNL,ONLCRNL,ODELBS")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                     help="log all RX data to this file (always appended, never deleted)")
+    ap.add_argument("--log-max-bytes", default=None, type=int, metavar="N",
+                    help="rotate log when size exceeds N bytes (0 disables rotation)")
+    ap.add_argument("--log-backups", default=None, type=int, metavar="N",
+                    help="number of rotated log generations to keep (default 0)")
     ap.add_argument("--log-strip", action="store_true",
                     help="strip ANSI/control chars before writing log lines")
     ap.add_argument("--timestamp", default=None, choices=["iso8601", "24hour", "epoch"],
@@ -1034,6 +1100,8 @@ def main() -> None:
     socket_path  = _get(args.socket,       "socket",       DEFAULT_SOCKET_PATH)
     map_str      = _get(args.map,          "map",          "")
     log_file     = _get(args.log_file,     "log_file",     None)
+    log_max_bytes = _get(args.log_max_bytes, "log_max_bytes", 0)
+    log_backups  = _get(args.log_backups,  "log_backups",  0)
     log_strip    = args.log_strip or bool(profile_cfg.get("log_strip", False))
     timestamp    = _get(args.timestamp,    "timestamp",    None)
     echo_enabled = args.echo or bool(profile_cfg.get("echo", False))
@@ -1046,7 +1114,7 @@ def main() -> None:
         worker.set_map(map_str)
     if log_file:
         worker.set_log_strip(log_strip)
-        worker.log_start(log_file)
+        worker.log_start(log_file, max_bytes=int(log_max_bytes), backups=int(log_backups))
     if timestamp:
         worker.set_timestamp(timestamp)
     if echo_enabled:

@@ -881,6 +881,54 @@ class TestMapLogTimestamp(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_log_rotation_creates_backup_generation(self):
+        import tempfile
+        import os
+
+        w = self._make_worker()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+            path = f.name
+        try:
+            w.log_start(path, max_bytes=20, backups=1)
+            w._log_line("aaaaaaaaaa")
+            w._log_line("bbbbbbbbbb")
+            w.log_stop()
+
+            self.assertTrue(os.path.exists(path))
+            self.assertTrue(os.path.exists(path + ".1"))
+
+            with open(path, encoding="utf-8") as f_active:
+                active = f_active.read()
+            with open(path + ".1", encoding="utf-8") as f_rot:
+                rotated = f_rot.read()
+
+            self.assertIn("bbbbbbbbbb", active)
+            self.assertIn("aaaaaaaaaa", rotated)
+        finally:
+            for p in (path, path + ".1", path + ".2"):
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_log_rotation_disabled_keeps_single_file(self):
+        import tempfile
+        import os
+
+        w = self._make_worker()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+            path = f.name
+        try:
+            w.log_start(path, max_bytes=0, backups=0)
+            for _ in range(3):
+                w._log_line("0123456789")
+            w.log_stop()
+
+            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(path + ".1"))
+        finally:
+            for p in (path, path + ".1"):
+                if os.path.exists(p):
+                    os.unlink(p)
+
 
 try:
     from mcp import ClientSession, StdioServerParameters
