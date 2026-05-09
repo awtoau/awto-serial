@@ -158,6 +158,48 @@ def serial_query(
 
 
 @mcp.tool()
+def serial_exec(
+    argv: list[str],
+    timeout_ms: int = 3000,
+    serial_timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    max_output_bytes: int = 4096,
+) -> str:
+    """Execute an explicit argv command and pipe each stdout line to serial query.
+
+    Safety constraints:
+    - explicit argv only (no shell string evaluation)
+    - bounded command timeout and stdout capture size
+    - stderr/exit-status reported separately from serial payload
+    """
+    req = {
+        "cmd": "exec",
+        "argv": argv,
+        "timeout_ms": int(timeout_ms),
+        "serial_timeout_ms": int(serial_timeout_ms),
+        "max_output_bytes": int(max_output_bytes),
+    }
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(_sock_path())
+            resp = send_request(sock, req)
+    except OSError as exc:
+        return f"error: {exc}"
+
+    if not resp.get("ok"):
+        return f"error: {resp.get('error', 'unknown')}"
+
+    out = resp.get("response", "")
+    meta = (
+        f"exit_code={resp.get('exit_code')}, sent_lines={resp.get('sent_lines')}, "
+        f"stdout_truncated={resp.get('stdout_truncated')}"
+    )
+    stderr_text = resp.get("stderr", "")
+    if stderr_text:
+        return f"{out}\n[{meta}]\n[stderr]\n{stderr_text}"
+    return f"{out}\n[{meta}]"
+
+
+@mcp.tool()
 def serial_ping() -> str:
     """Check that the serial daemon is running and the port is open.
 

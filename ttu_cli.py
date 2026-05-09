@@ -338,6 +338,16 @@ def main() -> None:
     sp_drain = sub.add_parser("drain", help="drain unsolicited RX buffer")
     sp_drain.add_argument("--max-bytes", type=int, default=0, help="max bytes to return (0 = all)")
 
+    sp_exec = sub.add_parser("exec", help="run explicit argv command and pipe stdout lines to serial")
+    sp_exec.add_argument("--exec-timeout", type=int, default=3000, metavar="MS",
+                         help="host command timeout in ms (default 3000)")
+    sp_exec.add_argument("--serial-timeout", type=int, default=DEFAULT_TIMEOUT_MS, metavar="MS",
+                         help=f"serial query timeout per line in ms (default {DEFAULT_TIMEOUT_MS})")
+    sp_exec.add_argument("--max-output-bytes", type=int, default=4096, metavar="N",
+                         help="max captured command stdout bytes (default 4096)")
+    sp_exec.add_argument("argv", nargs=argparse.REMAINDER,
+                         help="command argv after '--', e.g.: exec -- python3 -c 'print(\"status\")'")
+
     sub.add_parser("list-ports", help="list available serial ports")
 
     sp_sl = sub.add_parser("set-line", help="set DTR or RTS line state")
@@ -448,6 +458,32 @@ def main() -> None:
         if args.max_bytes > 0:
             req["max_bytes"] = args.max_bytes
         resp = _call(req)
+    elif args.subcmd == "exec":
+        argv = list(args.argv)
+        if argv and argv[0] == "--":
+            argv = argv[1:]
+        if not argv:
+            print("error: exec requires argv, e.g. ttu exec -- python3 -c 'print(\"status\")'", file=sys.stderr)
+            sys.exit(2)
+        resp = _call(
+            {
+                "cmd": "exec",
+                "argv": argv,
+                "timeout_ms": args.exec_timeout,
+                "serial_timeout_ms": args.serial_timeout,
+                "max_output_bytes": args.max_output_bytes,
+            }
+        )
+        if resp.get("ok"):
+            _print_response(resp)
+            print(
+                f"exit_code={resp.get('exit_code')} sent_lines={resp.get('sent_lines')} "
+                f"stdout_truncated={resp.get('stdout_truncated')}"
+            )
+            if resp.get("stderr"):
+                print("[stderr]", file=sys.stderr)
+                print(resp.get("stderr"), file=sys.stderr)
+            sys.exit(0)
     elif args.subcmd == "list-ports":
         resp = _call({"cmd": "list_ports"})
         if resp.get("ok"):

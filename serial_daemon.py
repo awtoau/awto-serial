@@ -22,6 +22,7 @@ import logging.handlers
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -45,6 +46,9 @@ _VALID_MAPS: frozenset[str] = frozenset({"INLCRNL", "ICRNL", "ONLCRNL", "ODELBS"
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_RESET = "\x1b[0m"
 _ANSI_TX = "\x1b[2;36m"
+_EXEC_TIMEOUT_MS_MAX = 60_000
+_EXEC_OUTPUT_BYTES_MAX = 65_536
+_EXEC_STDERR_BYTES_MAX = 4_096
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +834,48 @@ def _ascii_score(s: str) -> float:
     return good / len(s)
 
 
+def _run_exec_argv(argv: list[str], timeout_ms: int, max_output_bytes: int) -> dict:
+    """Run explicit argv command with bounded runtime/output.
+
+    Returns dict with stdout lines, stderr text, exit code, and truncation flag.
+    """
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
+        raise ValueError("exec: argv must be a non-empty list of non-empty strings")
+    if timeout_ms <= 0 or timeout_ms > _EXEC_TIMEOUT_MS_MAX:
+        raise ValueError(f"exec: timeout_ms must be in 1..{_EXEC_TIMEOUT_MS_MAX}")
+    if max_output_bytes <= 0 or max_output_bytes > _EXEC_OUTPUT_BYTES_MAX:
+        raise ValueError(f"exec: max_output_bytes must be in 1..{_EXEC_OUTPUT_BYTES_MAX}")
+
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=False,
+            timeout=timeout_ms / 1000.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"exec: command timed out after {timeout_ms}ms") from exc
+
+    stdout_bytes = proc.stdout or b""
+    stderr_bytes = proc.stderr or b""
+    stdout_truncated = len(stdout_bytes) > max_output_bytes
+    if stdout_truncated:
+        stdout_bytes = stdout_bytes[:max_output_bytes]
+    if len(stderr_bytes) > _EXEC_STDERR_BYTES_MAX:
+        stderr_bytes = stderr_bytes[:_EXEC_STDERR_BYTES_MAX]
+
+    lines = [ln.strip() for ln in stdout_bytes.decode(errors="replace").splitlines() if ln.strip()]
+    stderr_text = stderr_bytes.decode(errors="replace")
+
+    return {
+        "lines": lines,
+        "exit_code": int(proc.returncode),
+        "stderr": stderr_text,
+        "stdout_truncated": stdout_truncated,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Client connection handler
 # ---------------------------------------------------------------------------
@@ -893,6 +939,46 @@ def handle_client(conn: socket.socket, addr: str, worker: SerialWorker) -> None:
                             out = worker.query_full(line_str, timeout_ms)
                             _send(conn, {"ok": True, **out})
                     except (IOError, ValueError) as exc:
+                        _send(conn, make_err(str(exc)))
+
+                elif cmd == "exec":
+                    with worker._reconnect_lock:
+                        reconnecting = worker._reconnecting
+                    if reconnecting:
+                        _send(conn, make_err("reconnecting: serial port temporarily unavailable"))
+                        continue
+
+                    argv = req.get("argv", [])
+                    timeout_ms = int(req.get("timeout_ms", 3000))
+                    max_output_bytes = int(req.get("max_output_bytes", 4096))
+                    serial_timeout_ms = int(req.get("serial_timeout_ms", 500))
+
+                    try:
+                        if serial_timeout_ms <= 0 or serial_timeout_ms > 10_000:
+                            _send(conn, make_err("exec: serial_timeout_ms must be in 1..10000"))
+                            continue
+                        cmd_out = _run_exec_argv(argv, timeout_ms, max_output_bytes)
+                        responses: list[str] = []
+                        warnings: list[str] = []
+                        for line in cmd_out["lines"]:
+                            out = worker.query_full(line, serial_timeout_ms)
+                            responses.append(out.get("response", ""))
+                            warning = out.get("warning")
+                            if warning:
+                                warnings.append(warning)
+
+                        payload = {
+                            "ok": True,
+                            "response": "\n".join(x for x in responses if x),
+                            "exit_code": cmd_out["exit_code"],
+                            "stderr": cmd_out["stderr"],
+                            "sent_lines": len(cmd_out["lines"]),
+                            "stdout_truncated": cmd_out["stdout_truncated"],
+                        }
+                        if warnings:
+                            payload["warning"] = "; ".join(warnings)
+                        _send(conn, payload)
+                    except (ValueError, TimeoutError, IOError) as exc:
                         _send(conn, make_err(str(exc)))
 
                 elif cmd == "set_baud":

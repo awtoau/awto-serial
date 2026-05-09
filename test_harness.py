@@ -548,6 +548,44 @@ class TestIntegration(unittest.TestCase):
         self.assertIn("warning", resp)
         self.assertIn("unterminated", resp["warning"])
 
+    def test_exec_argv_success(self):
+        resp = _client_query(
+            self._tmp,
+            {
+                "cmd": "exec",
+                "argv": [sys.executable, "-c", "print('status')"],
+                "timeout_ms": 2000,
+                "serial_timeout_ms": 200,
+                "max_output_bytes": 1024,
+            },
+        )
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["response"], "OK status")
+        self.assertEqual(resp["exit_code"], 0)
+        self.assertEqual(resp["sent_lines"], 1)
+        self.assertIn("stdout_truncated", resp)
+
+    def test_exec_argv_rejects_invalid_argv(self):
+        resp = _client_query(
+            self._tmp,
+            {"cmd": "exec", "argv": "echo status", "timeout_ms": 1000},
+        )
+        self.assertFalse(resp["ok"])
+        self.assertIn("argv", resp["error"])
+
+    def test_exec_argv_rejects_max_output_bytes_out_of_range(self):
+        resp = _client_query(
+            self._tmp,
+            {
+                "cmd": "exec",
+                "argv": [sys.executable, "-c", "print('status')"],
+                "timeout_ms": 1000,
+                "max_output_bytes": 0,
+            },
+        )
+        self.assertFalse(resp["ok"])
+        self.assertIn("max_output_bytes", resp["error"])
+
     def test_throughput(self):
         """Measure round-trip latency for sequential queries (informational)."""
         N = 50

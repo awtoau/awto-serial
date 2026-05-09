@@ -73,6 +73,7 @@ Options:
 |------|-----------|-------------|
 | `serial_ping` | — | Check daemon is alive |
 | `serial_query` | `command`, `timeout_ms`, `include_timestamp`, `timestamp_format`, `output_mode` | Send a command, read response (optional timestamp or raw hex mode) |
+| `serial_exec` | `argv`, `timeout_ms`, `serial_timeout_ms`, `max_output_bytes` | Execute explicit host argv (no shell), pipe stdout lines into serial queries, return response + exit metadata |
 | `serial_info` | — | Show port, baud, eol, is_open |
 | `serial_set_baud` | `baud` | Change baud rate live |
 | `serial_set_eol` | `eol` | Change line ending (`lf`/`cr`/`crlf`) |
@@ -114,6 +115,7 @@ send a break
 .venv-ft/bin/python ttu_cli.py query "status"
 .venv-ft/bin/python ttu_cli.py query "status" --output-mode hex
 .venv-ft/bin/python ttu_cli.py query "status" --timestamp epoch
+.venv-ft/bin/python ttu_cli.py exec -- python3 -c "print('status')"
 .venv-ft/bin/python ttu_cli.py set-baud 2480000
 .venv-ft/bin/python ttu_cli.py set-eol crlf
 .venv-ft/bin/python ttu_cli.py detect-baud --probe "?"
@@ -140,6 +142,8 @@ New subcommands:
 .venv-ft/bin/python ttu_cli.py send-break --duration 500
 .venv-ft/bin/python ttu_cli.py pulse-line dtr --duration 200
 ```
+
+`exec` is intentionally constrained for safety: explicit argv only (no shell-string evaluation), bounded host-command timeout, and bounded captured stdout size.
 
 ---
 
