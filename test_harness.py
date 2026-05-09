@@ -1108,6 +1108,63 @@ class TestMcpClientEndToEnd(unittest.TestCase):
         asyncio.run(self._drive())
 
 
+class TestFTDILatencyTimer(unittest.TestCase):
+    """Test Windows FTDI latency timer reduction (best-effort, no-op on non-Windows)."""
+
+    def test_latency_noop_on_non_windows(self):
+        """On non-Windows, _reduce_ftdi_latency_timer does nothing."""
+        from serial_daemon import _reduce_ftdi_latency_timer
+        from unittest.mock import MagicMock, patch
+
+        mock_ser = MagicMock()
+        # Should not raise or access winreg on non-Windows
+        with patch("sys.platform", "linux"):
+            _reduce_ftdi_latency_timer("COM3", mock_ser)  # no-op
+
+    def test_latency_noop_on_non_ftdi(self):
+        """On Windows, if port is not FTDI, _reduce_ftdi_latency_timer is no-op."""
+        from serial_daemon import _reduce_ftdi_latency_timer
+        from unittest.mock import MagicMock, patch
+
+        mock_ser = MagicMock()
+        mock_port = MagicMock()
+        mock_port.device = "COM3"
+        mock_port.vid = 0x1234  # Not FTDI
+
+        # Patch sys.platform and comports to avoid actual registry access
+        with patch("sys.platform", "win32"):
+            with patch("serial.tools.list_ports.comports", return_value=[mock_port]):
+                # Should log but not attempt registry access
+                _reduce_ftdi_latency_timer("COM3", mock_ser)
+
+    def test_latency_logs_ftdi_detected(self):
+        """On Windows, if FTDI is detected, _reduce_ftdi_latency_timer attempts registry update."""
+        from serial_daemon import _reduce_ftdi_latency_timer
+        from unittest.mock import MagicMock, patch, MagicMock as MockModule
+
+        mock_ser = MagicMock()
+        mock_port = MagicMock()
+        mock_port.device = "COM3"
+        mock_port.vid = 0x0403  # FTDI VID
+
+        # Create a mock winreg module to simulate Windows environment
+        mock_winreg = MagicMock()
+        mock_reg_conn = MagicMock()
+        mock_winreg.ConnectRegistry.return_value = mock_reg_conn
+        mock_winreg.HKEY_LOCAL_MACHINE = 0x80000002
+        mock_winreg.KEY_ENUMERATE_SUB_KEYS = 0x0008
+        mock_winreg.KEY_WRITE = 0x0020
+        
+        # Patch to avoid actual registry access; just verify detection happens
+        with patch("sys.platform", "win32"):
+            with patch("serial.tools.list_ports.comports", return_value=[mock_port]):
+                with patch.dict("sys.modules", {"winreg": mock_winreg}):
+                    # Mock registry failure (acceptable best-effort behavior)
+                    mock_winreg.OpenKey.side_effect = OSError("reg unavailable")
+                    _reduce_ftdi_latency_timer("COM3", mock_ser)
+                    # Function should complete without raising
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

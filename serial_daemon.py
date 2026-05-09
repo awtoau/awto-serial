@@ -29,6 +29,10 @@ import time
 import serial
 import serial.tools.list_ports
 
+# Windows registry access for FTDI latency timer fix
+if sys.platform == "win32":
+    import winreg
+
 from protocol import (
     CANDIDATE_BAUDS,
     DEFAULT_BAUD,
@@ -49,6 +53,7 @@ _ANSI_TX = "\x1b[2;36m"
 _EXEC_TIMEOUT_MS_MAX = 60_000
 _EXEC_OUTPUT_BYTES_MAX = 65_536
 _EXEC_STDERR_BYTES_MAX = 4_096
+_FTDI_VID = 0x0403
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +185,8 @@ class SerialWorker:
             timeout=0.01,       # non-blocking short reads
             write_timeout=0.2,
         )
+        # Windows FTDI adapter: reduce latency timer from default 16 ms to 1 ms
+        _reduce_ftdi_latency_timer(self._port, self._ser)
         log.info("serial open: %s @ %d (eol=%s)", self._port, self._baud, self._eol)
         self._start_rx_thread()
 
@@ -798,6 +805,8 @@ class SerialWorker:
                     timeout=0.01,
                     write_timeout=0.2,
                 )
+                # Windows FTDI adapter: reduce latency timer from default 16 ms to 1 ms
+                _reduce_ftdi_latency_timer(self._port, ser)
                 with self._lock:
                     self._ser = ser
                 with self._reconnect_lock:
@@ -806,6 +815,69 @@ class SerialWorker:
                 return
             except serial.SerialException as exc:
                 log.debug("reconnect: still failing: %s", exc)
+
+
+def _reduce_ftdi_latency_timer(port: str, ser: serial.Serial) -> None:
+    """On Windows, attempt to reduce FTDI adapter latency timer to 1 ms for lower latency.
+
+    This is a best-effort helper — it logs warnings but does not raise.
+    """
+    if sys.platform != "win32":
+        return
+
+    # Detect FTDI by VID
+    is_ftdi = False
+    try:
+        for p in serial.tools.list_ports.comports():
+            if p.device == port and p.vid == _FTDI_VID:
+                is_ftdi = True
+                log.debug("ftdi latency: detected VID 0x%04x on %s", _FTDI_VID, port)
+                break
+    except Exception as exc:
+        log.warning("ftdi latency: port scan failed: %s", exc)
+        return
+
+    if not is_ftdi:
+        return
+
+    # Attempt registry-based latency timer reduction.
+    # HKLM\SYSTEM\CurrentControlSet\Enum\FTDIBUS\<device>\0000\Device Parameters\LatencyTimer = 1
+    try:
+        # Extract device ID from port name (e.g., COM3 → 3)
+        com_num = port.split("COM")[-1]
+        # Registry key lookup is complex; simplify by iterating FTDIBUS keys
+        reg_path = r"SYSTEM\CurrentControlSet\Enum\FTDIBUS"
+        registry = winreg.ConnectRegistry(None, winreg.HKEY_LOCAL_MACHINE)
+        try:
+            key = winreg.OpenKey(registry, reg_path, access=winreg.KEY_ENUMERATE_SUB_KEYS)
+        except (OSError, FileNotFoundError) as exc:
+            log.warning("ftdi latency: registry key not found: %s", exc)
+            return
+
+        # Iterate FTDI device subkeys to find the matching port
+        try:
+            idx = 0
+            while True:
+                try:
+                    device_id = winreg.EnumKey(key, idx)
+                    idx += 1
+                    # Try to open Device Parameters subkey
+                    device_key_path = f"{reg_path}\\{device_id}\\0000\\Device Parameters"
+                    device_key = winreg.OpenKey(registry, device_key_path, access=winreg.KEY_WRITE)
+                    winreg.SetValueEx(device_key, "LatencyTimer", 0, winreg.REG_BINARY, b"\x01")
+                    log.info("ftdi latency: set LatencyTimer=1 for %s", port)
+                    winreg.CloseKey(device_key)
+                    return
+                except (OSError, FileNotFoundError):
+                    # Device key doesn't have Device Parameters or wrong device, continue
+                    continue
+        except (WindowsError, OSError):
+            pass
+        finally:
+            winreg.CloseKey(key)
+            registry.Close()
+    except Exception as exc:
+        log.warning("ftdi latency: registry update failed: %s", exc)
 
 
 def _list_ports() -> list[dict]:

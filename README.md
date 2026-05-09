@@ -193,6 +193,20 @@ systemctl --user daemon-reload
 
 ---
 
+## Windows FTDI Adapter Support
+
+When opening a serial port on Windows with an FTDI USB-serial adapter (VID 0x0403), the daemon automatically attempts to reduce the latency timer from the Windows default (16 ms) to 1 ms. This reduces per-read latency and improves throughput for high-speed serial applications.
+
+**Behaviour:**
+
+- On non-Windows or non-FTDI devices: no-op, no log output.
+- On Windows with FTDI: attempts registry-based `LatencyTimer` reduction (best-effort).
+- If registry update fails: logs a warning but does not fail the port open — full functionality is preserved.
+
+No configuration is required; the latency timer reduction happens automatically on every port open (initial and reconnect).
+
+---
+
 ## Long-Running Tasks (Agent Workflow)
 
 For long jobs (large ingests, long test runs, large builds), prefer a visible log/tail pattern so humans can watch progress live:
