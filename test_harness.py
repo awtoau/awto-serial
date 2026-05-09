@@ -46,7 +46,7 @@ from protocol import (
     recv_response,
     send_request,
 )
-from serial_daemon import SerialWorker, handle_client, _send
+from serial_daemon import SerialWorker, handle_client, _send, _make_stderr_formatter
 
 logging.basicConfig(
     level=logging.WARNING,   # keep test output clean
@@ -928,6 +928,44 @@ class TestMapLogTimestamp(unittest.TestCase):
             for p in (path, path + ".1"):
                 if os.path.exists(p):
                     os.unlink(p)
+
+
+class _DummyStderr:
+    def __init__(self, is_tty: bool):
+        self._is_tty = is_tty
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+
+class TestInteractiveStderrFormatter(unittest.TestCase):
+    def _record(self, message: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="daemon",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=message,
+            args=(),
+            exc_info=None,
+        )
+
+    def test_no_color_when_not_tty(self):
+        fmt = _make_stderr_formatter("awto-serial-daemon", _DummyStderr(False))
+        out = fmt.format(self._record("TX hello"))
+        self.assertNotIn("\x1b[", out)
+
+    def test_no_color_when_no_color_env_set(self):
+        with patch.dict(os.environ, {"NO_COLOR": "1"}, clear=False):
+            fmt = _make_stderr_formatter("awto-serial-daemon", _DummyStderr(True))
+            out = fmt.format(self._record("TX hello"))
+        self.assertNotIn("\x1b[", out)
+
+    def test_tx_token_colored_when_tty_and_no_color_unset(self):
+        with patch.dict(os.environ, {}, clear=True):
+            fmt = _make_stderr_formatter("awto-serial-daemon", _DummyStderr(True))
+            out = fmt.format(self._record("TX hello"))
+        self.assertIn("\x1b[2;36mTX\x1b[0m", out)
 
 
 try:

@@ -43,11 +43,42 @@ log = logging.getLogger("daemon")
 
 _VALID_MAPS: frozenset[str] = frozenset({"INLCRNL", "ICRNL", "ONLCRNL", "ODELBS"})
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_RESET = "\x1b[0m"
+_ANSI_TX = "\x1b[2;36m"
 
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+
+class _InteractiveStderrFormatter(logging.Formatter):
+    """Optional color formatter for interactive stderr output."""
+
+    def __init__(self, fmt: str, enable_color: bool) -> None:
+        super().__init__(fmt)
+        self._enable_color = enable_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        if not self._enable_color:
+            return text
+        # Keep RX plain by default; dim/cyan highlight TX tokens only.
+        return re.sub(r"\bTX\b", f"{_ANSI_TX}TX{_ANSI_RESET}", text)
+
+
+def _use_stderr_color(stream) -> bool:
+    """Enable ANSI color only for interactive terminals and when NO_COLOR is unset."""
+    if "NO_COLOR" in os.environ:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        return False
+
+
+def _make_stderr_formatter(ident: str, stream) -> logging.Formatter:
+    fmt = f"{ident}[%(process)d]: %(levelname)-8s %(name)s: %(message)s"
+    return _InteractiveStderrFormatter(fmt, enable_color=_use_stderr_color(stream))
 
 def _setup_logging(ident: str, level_name: str) -> None:
     """Configure syslog + stderr logging.
@@ -76,10 +107,7 @@ def _setup_logging(ident: str, level_name: str) -> None:
 
     # --- stderr handler (interactive / systemd ExecStart journal fallback) ---
     stderr = logging.StreamHandler(sys.stderr)
-    stderr_fmt = logging.Formatter(
-        f"{ident}[%(process)d]: %(levelname)-8s %(name)s: %(message)s"
-    )
-    stderr.setFormatter(stderr_fmt)
+    stderr.setFormatter(_make_stderr_formatter(ident, sys.stderr))
     root.addHandler(stderr)
 
 
