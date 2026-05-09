@@ -143,6 +143,52 @@ New subcommands:
 
 ---
 
+## Auto-Start with systemd
+
+A ready-made systemd user service unit is provided in `contrib/awto-serial-daemon.service`. It binds to the `/dev/ttyACM0` device unit so the daemon starts automatically when the device is attached and stops when it is removed.
+
+### Install (user service — no root required)
+
+```bash
+# Copy the unit file into the user service directory
+mkdir -p ~/.config/systemd/user
+cp contrib/awto-serial-daemon.service ~/.config/systemd/user/
+
+# Optional: override port/baud/socket by creating an env file
+cat > ~/.config/awto-serial.env <<'EOF'
+AWTO_PORT=/dev/ttyACM0
+AWTO_BAUD=115200
+AWTO_SOCKET=/tmp/awto-serial.sock
+EOF
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now awto-serial-daemon.service
+
+# Check status / follow logs
+systemctl --user status awto-serial-daemon.service
+journalctl --user -u awto-serial-daemon.service -f
+```
+
+To target a different device (e.g. `/dev/ttyUSB0`) either edit the `EnvironmentFile` or override the `BindsTo`/`After` directives with a `.d/` drop-in:
+
+```bash
+mkdir -p ~/.config/systemd/user/awto-serial-daemon.service.d
+cat > ~/.config/systemd/user/awto-serial-daemon.service.d/port.conf <<'EOF'
+[Unit]
+BindsTo=dev-ttyUSB0.device
+After=dev-ttyUSB0.device
+
+[Service]
+Environment=AWTO_PORT=/dev/ttyUSB0
+EOF
+systemctl --user daemon-reload
+```
+
+> **Auto-reconnect**: the daemon has built-in reconnect logic; `Restart=on-failure` in the unit is a backstop for unexpected crashes, not a substitute.
+
+---
+
 ## Long-Running Tasks (Agent Workflow)
 
 For long jobs (large ingests, long test runs, large builds), prefer a visible log/tail pattern so humans can watch progress live:

@@ -1,0 +1,40 @@
+[Unit]
+Description=awto serial daemon
+Documentation=https://github.com/awto-au/awto-mcp
+# Bind to the specific device unit so systemd starts/stops us with the device.
+# Override via EnvironmentFile if your device path differs.
+BindsTo=dev-ttyACM0.device
+After=dev-ttyACM0.device
+
+[Service]
+Type=simple
+# --- Runtime identity ---
+# Run as the invoking user (override: add User=/Group= below if running as a
+# dedicated system user).
+
+# --- Configurable parameters via EnvironmentFile ---
+# Create /etc/awto-serial.env with lines like:
+#   AWTO_PORT=/dev/ttyACM0
+#   AWTO_BAUD=115200
+#   AWTO_SOCKET=/tmp/awto-serial.sock
+EnvironmentFile=-/etc/awto-serial.env
+Environment=AWTO_PORT=/dev/ttyACM0
+Environment=AWTO_BAUD=2000000
+Environment=AWTO_SOCKET=/tmp/awto-serial.sock
+
+ExecStart=/usr/bin/env python3 %h/git/awto-mcp/serial_daemon.py \
+    --port      ${AWTO_PORT}   \
+    --baud      ${AWTO_BAUD}   \
+    --socket    ${AWTO_SOCKET}
+
+# Restart policy: restart on failure; do not restart on clean exit.
+Restart=on-failure
+RestartSec=3s
+
+# Log to the journal; no separate log file needed unless --log-file is passed.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=awto-serial-daemon
+
+[Install]
+WantedBy=default.target
