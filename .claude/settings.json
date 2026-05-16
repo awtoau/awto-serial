@@ -1,0 +1,91 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash *)",
+      "Bash(source *)",
+      "Bash(chmod *)",
+      "Bash(kill *)",
+      "Bash(pkill *)",
+      "Bash(pgrep *)",
+      "Bash(jobs *)",
+      "Bash(tmux *)",
+      "Bash(wmctrl *)",
+      "Bash(lsof *)",
+      "Bash(fuser *)",
+      "Bash(vi *)",
+      "Bash(visudo *)",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(cmake *)",
+      "Bash(ninja *)",
+      "Bash(make *)",
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(../.venv/bin/python *)",
+      "Bash(sgd *)",
+      "Bash(west *)",
+      "Bash(arm-none-eabi-* *)",
+      "Bash(gdb *)",
+      "Bash(st-flash *)",
+      "Bash(STM32_Programmer_CLI *)",
+      "Bash(STLINK_CLI *)",
+      "Bash(STLinkCLI *)",
+      "Bash(tio *)",
+      "Bash(lsusb *)",
+      "Bash(lsusb)",
+      "Bash(ls /dev/serial/*)",
+      "Bash(ls /dev/ttyACM*)",
+      "Bash(ls /dev/tty*)",
+      "Bash(stty -F *)",
+      "Bash(cat /dev/tty*)",
+      "Bash(cat /dev/serial/*)",
+      "Bash(udevadm *)",
+      "Bash(dmesg *)",
+      "Bash(journalctl *)",
+      "Bash(ip *)",
+      "Bash(ping *)",
+      "Bash(arp *)",
+      "Bash(arping *)",
+      "Bash(nmcli *)",
+      "Bash(tcpdump *)",
+      "Bash(candump *)",
+      "Bash(cansend *)",
+      "Bash(sysctl *)",
+      "Bash(ps *)",
+      "Bash(grep *)",
+      "Bash(awk *)",
+      "Bash(wc *)",
+      "Bash(tail *)",
+      "Bash(sed *)",
+      "Bash(find *)",
+      "Bash(tee *)",
+      "Bash(unzip *)",
+      "Bash(strings *)",
+      "Bash(xargs *)",
+      "Bash(timeout *)",
+      "Bash(scripts/* *)",
+      "Bash(tools/* *)",
+      "Bash(flutter *)",
+      "Bash(dart *)",
+      "Bash(code *)",
+      "Bash(code-insiders *)"
+    ]
+  },
+  "additionalDirectories": [
+    "/home/dan/git"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,re,os; src='/home/dan/git/awto-dan/code/vscode/settings.example.json'; c=open(src).read(); c=re.sub(r'//[^\\n]*','',c); c=re.sub(r',(\\s*[}\\]])',r'\\1',c); ex=json.loads(c); cs='/home/dan/git/awto-dan/.claude/settings.json'; s=json.load(open(cs)); s['permissions']=ex.get('permissions',{}); json.dump(s,open(cs,'w'),indent=2); vp='/home/dan/git/awto-dan/.vscode/settings.json'; vs=json.load(open(vp)) if os.path.exists(vp) else {}; net=ex.get('network',{}); vs.update({k:v for k,v in {'chat.agent.allowedNetworkDomains':net.get('allowedDomains'),'chat.agent.deniedNetworkDomains':net.get('deniedDomains')}.items() if v}); fs=ex.get('filesystem',{}); fs and vs.update({'chat.agent.sandbox.FileSystem.linux':{k:v for k,v in fs.items() if v}}); json.dump(vs,open(vp,'w'),indent=2)\""
+          }
+        ]
+      }
+    ]
+  }
+}
