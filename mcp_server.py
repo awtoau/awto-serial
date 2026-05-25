@@ -114,6 +114,7 @@ def serial_query(
     include_timestamp: bool = False,
     timestamp_format: str = "",
     output_mode: str = "text",
+    transform: str = "",
 ) -> str:
     """Send an ASCII command to the serial device and return its response.
 
@@ -123,11 +124,12 @@ def serial_query(
         include_timestamp: Include timestamp in output when enabled.
         timestamp_format: Optional one-shot format: 'iso8601', '24hour', 'epoch'.
         output_mode: 'text' (default) or 'hex' for space-separated hex bytes.
+        transform: Optional transform to apply: 'crlf', 'hex', 'visualize-controls'.
 
     Returns:
         The device's ASCII response, stripped of leading/trailing whitespace.
     """
-    log.debug("serial_query: %r timeout=%dms", command, timeout_ms)
+    log.debug("serial_query: %r timeout=%dms transform=%r", command, timeout_ms, transform)
     req = {
         "cmd": "query",
         "line": command,
@@ -137,6 +139,8 @@ def serial_query(
     }
     if timestamp_format:
         req["timestamp_format"] = timestamp_format
+    if transform:
+        req["transform"] = transform.split(",") if "," in transform else [transform]
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.connect(_sock_path())
