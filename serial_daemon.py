@@ -33,6 +33,66 @@ import serial.tools.list_ports
 if sys.platform == "win32":
     import winreg
 
+
+# ---------------------------------------------------------------------------
+# Line Transform Pipeline (miniterm-compatible)
+# ---------------------------------------------------------------------------
+# Extract line-by-line transformations for serial responses, inspired by
+# pyserial's miniterm transform pipeline.
+
+class LineTransform:
+    """Base class: do-nothing, forward all data unchanged."""
+
+    def transform(self, text: str) -> str:
+        """Transform received line."""
+        return text
+
+
+class TransformCRLF(LineTransform):
+    """Normalize different line endings to LF."""
+
+    def transform(self, text: str) -> str:
+        """Replace CRLF and CR with LF."""
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class TransformHexDump(LineTransform):
+    """Show non-printable characters as hex codes."""
+
+    def transform(self, text: str) -> str:
+        """Replace control characters with [0xNN] hex notation."""
+        result = []
+        for c in text:
+            # Keep printable ASCII and newlines
+            if 32 <= ord(c) <= 126 or c in "\n\t":
+                result.append(c)
+            else:
+                result.append(f"[0x{ord(c):02x}]")
+        return "".join(result)
+
+
+class TransformVisualizeControls(LineTransform):
+    """Visualize control characters using Unicode symbols (like miniterm)."""
+
+    # Map control codes to Unicode symbols (U+2400 block)
+    CONTROL_MAP = {
+        ord(c): 0x2400 + ord(c) for c in map(chr, range(32)) if c not in "\r\n\t"
+    }
+    CONTROL_MAP[0x7F] = 0x2421  # DEL
+    CONTROL_MAP[0x9B] = 0x2425  # CSI
+
+    def transform(self, text: str) -> str:
+        """Replace control codes with Unicode symbols."""
+        return text.translate(self.CONTROL_MAP)
+
+
+# Registry of available transforms
+LINE_TRANSFORMS = {
+    "crlf": TransformCRLF,
+    "hex": TransformHexDump,
+    "visualize-controls": TransformVisualizeControls,
+}
+
 from protocol import (
     CANDIDATE_BAUDS,
     DEFAULT_BAUD,
@@ -263,16 +323,31 @@ class SerialWorker:
                 log.warning("unterminated response from device (hex mode): %r", raw[:40])
             return out
 
-    def query_full(self, line: str, timeout_ms: int) -> dict:
+    def query_full(self, line: str, timeout_ms: int, transform_names: list[str] | None = None) -> dict:
         """Like query() but returns a dict with an optional 'warning' key.
 
         If the device sends data with no EOL terminator before the deadline,
         ``warning`` is set to explain the issue so callers can alert the user.
+
+        Args:
+            line: command to send
+            timeout_ms: deadline in milliseconds
+            transform_names: optional list of transform names to apply (e.g., ["crlf", "hex"])
         """
         with self._lock:
             raw, terminated = self._query_locked(line, timeout_ms)
             result = self._decode_response(raw)
             result = self._echo_response(line, result)
+            
+            # Apply line transforms if requested
+            if transform_names:
+                for name in transform_names:
+                    if name in LINE_TRANSFORMS:
+                        transformer = LINE_TRANSFORMS[name]()
+                        result = transformer.transform(result)
+                    else:
+                        log.warning("unknown transform: %r", name)
+            
             out: dict = {"response": result}
             if not terminated and result:
                 out["warning"] = (
@@ -994,6 +1069,9 @@ def handle_client(conn: socket.socket, addr: str, worker: SerialWorker) -> None:
                     include_ts = bool(req.get("include_timestamp", False))
                     ts_fmt = req.get("timestamp_format")
                     output_mode = str(req.get("output_mode", "text")).lower()
+                    transform_names = req.get("transform", [])
+                    if isinstance(transform_names, str):
+                        transform_names = [transform_names]
                     try:
                         if output_mode not in ("text", "hex"):
                             _send(conn, make_err("query: output_mode must be 'text' or 'hex'"))
@@ -1008,7 +1086,7 @@ def handle_client(conn: socket.socket, addr: str, worker: SerialWorker) -> None:
                             out = worker.query_hex_full(line_str, timeout_ms)
                             _send(conn, {"ok": True, **out})
                         else:
-                            out = worker.query_full(line_str, timeout_ms)
+                            out = worker.query_full(line_str, timeout_ms, transform_names or None)
                             _send(conn, {"ok": True, **out})
                     except (IOError, ValueError) as exc:
                         _send(conn, make_err(str(exc)))
