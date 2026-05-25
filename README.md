@@ -26,6 +26,14 @@ VS Code Copilot
 
 ---
 
+## Sandbox Access Note
+
+For this project, the supported and documented path is the daemon + MCP architecture shown above.
+
+If you need other host-to-sandbox bridging patterns (`tio` spool logs, `socat`, `tmux`, etc.), see `debris/docs/SANDBOX-SERIAL-ACCESS.md` (archived alternatives and trade-offs). Those patterns are not this repo's primary workflow.
+
+---
+
 ## Quick Start
 
 ### Requirements
