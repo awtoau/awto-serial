@@ -124,7 +124,18 @@ def serial_query(
         include_timestamp: Include timestamp in output when enabled.
         timestamp_format: Optional one-shot format: 'iso8601', '24hour', 'epoch'.
         output_mode: 'text' (default) or 'hex' for space-separated hex bytes.
-        transform: Optional transform to apply: 'crlf', 'hex', 'visualize-controls'.
+        transform: Optional line transform(s) to apply. Comma-separated for multiple.
+                   Choices:
+                     'crlf'               — normalize CRLF/CR to LF.
+                     'hex'                — true hex dump: every non-printable byte
+                                            as [0xNN], including LF/CR/tab/ESC/bell.
+                     'safe'               — cat -v style: ^G/^[/^M/^? for controls,
+                                            M-x for high bytes; \\n and \\t kept literal
+                                            so layout survives. Use this when you want
+                                            to read output without the terminal
+                                            misbehaving (bell, cursor moves, etc).
+                     'visualize-controls' — replace controls with Unicode pictures
+                                            from the U+2400 block (␇ ␛ ␍ ␡ …).
 
     Returns:
         The device's ASCII response, stripped of leading/trailing whitespace.

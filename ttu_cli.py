@@ -286,6 +286,13 @@ def main() -> None:
                           help="include timestamp in the response")
     sp_query.add_argument("--output-mode", choices=["text", "hex"], default="text",
                           help="response format (default: text)")
+    sp_query.add_argument("--transform", action="append", default=[],
+                          metavar="NAME",
+                          help="apply line transform (repeatable). "
+                               "Choices: crlf (normalize line endings), "
+                               "hex (true hex dump, every non-printable as [0xNN]), "
+                               "safe (cat -v style: ^G/^[/^M, keeps \\n and \\t), "
+                               "visualize-controls (Unicode pictures U+2400 block)")
 
     sub.add_parser("ping", help="health-check the daemon")
     sub.add_parser("info", help="show current port / baud / eol")
@@ -519,6 +526,8 @@ def main() -> None:
         log.debug("query: %r timeout=%dms", text, args.timeout)
         req = {"cmd": "query", "line": text, "timeout_ms": args.timeout}
         req["output_mode"] = getattr(args, "output_mode", "text")
+        if getattr(args, "transform", None):
+            req["transform"] = args.transform
         if getattr(args, "timestamp", None):
             req["include_timestamp"] = True
             req["timestamp_format"] = args.timestamp

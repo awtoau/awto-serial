@@ -1165,6 +1165,94 @@ class TestFTDILatencyTimer(unittest.TestCase):
                     # Function should complete without raising
 
 
+
+
+class TestLineTransforms(unittest.TestCase):
+    """Test line transform pipeline (miniterm-compatible)."""
+
+    def test_transform_crlf_replaces_line_endings(self):
+        """TransformCRLF should normalize CRLF/CR to LF."""
+        from serial_daemon import TransformCRLF
+
+        t = TransformCRLF()
+        self.assertEqual(t.transform("hello\r\nworld"), "hello\nworld")
+        self.assertEqual(t.transform("hello\rworld"), "hello\nworld")
+        self.assertEqual(t.transform("hello\nworld"), "hello\nworld")
+        self.assertEqual(t.transform("line1\r\nline2\rline3\n"), "line1\nline2\nline3\n")
+
+    def test_transform_hex_dump_replaces_all_non_printable(self):
+        """TransformHexDump is a true hex dump: every non-printable byte shown."""
+        from serial_daemon import TransformHexDump
+
+        t = TransformHexDump()
+        self.assertEqual(t.transform("hello"), "hello")
+        self.assertEqual(t.transform("hello\x00world"), "hello[0x00]world")
+        self.assertEqual(t.transform("hello\x01\x02\x03"), "hello[0x01][0x02][0x03]")
+        # No whitelist: LF, CR, tab, ESC, bell all rendered as hex
+        self.assertEqual(
+            t.transform("hello\nworld\ttest"),
+            "hello[0x0a]world[0x09]test",
+        )
+        self.assertEqual(t.transform("\x07\x1b\r"), "[0x07][0x1b][0x0d]")
+
+    def test_transform_safe_uses_caret_notation(self):
+        """TransformSafe should make bytes safe to display: cat -v style."""
+        from serial_daemon import TransformSafe
+
+        t = TransformSafe()
+        # Printables unchanged
+        self.assertEqual(t.transform("hello"), "hello")
+        # \n and \t preserved literally so layout survives
+        self.assertEqual(t.transform("a\nb\tc"), "a\nb\tc")
+        # Bell, ESC, CR become caret notation (no terminal side effects)
+        self.assertEqual(t.transform("\x07"), "^G")
+        self.assertEqual(t.transform("\x1b"), "^[")
+        self.assertEqual(t.transform("\r"), "^M")
+        # DEL
+        self.assertEqual(t.transform("\x7f"), "^?")
+        # High printable byte → M-x
+        self.assertEqual(t.transform("\xe9"), "M-i")  # 0xE9 - 0x80 = 0x69 = 'i'
+        # High control byte → M-^X
+        self.assertEqual(t.transform("\x9b"), "M-^[")  # CSI
+
+    def test_transform_visualize_controls_uses_unicode(self):
+        """TransformVisualizeControls should use Unicode symbols for controls."""
+        from serial_daemon import TransformVisualizeControls
+
+        t = TransformVisualizeControls()
+        # Control char 0x01 should map to U+2401
+        result = t.transform("\x01")
+        self.assertEqual(ord(result), 0x2401)
+        # DEL (0x7F) should map to U+2421
+        result = t.transform("\x7f")
+        self.assertEqual(ord(result), 0x2421)
+        # Printables should pass through
+        self.assertEqual(t.transform("hello"), "hello")
+
+    def test_query_full_with_transforms(self):
+        """SerialWorker.query_full should apply requested transforms."""
+        worker = _make_worker_with_mock([b"status\x01\x02\x03\r\n"])
+        out = worker.query_full("status", 500, transform_names=["hex"])
+        self.assertIn("[0x01]", out["response"])
+        self.assertIn("[0x02]", out["response"])
+        self.assertIn("[0x03]", out["response"])
+
+    def test_query_full_with_crlf_transform(self):
+        """TransformCRLF should normalize line endings."""
+        worker = _make_worker_with_mock([b"line1\r\nline2\rline3\n"])
+        out = worker.query_full("test", 500, transform_names=["crlf"])
+        # decode_response() strips trailing EOL before transforms, so final value has 2 LF separators.
+        self.assertEqual(out["response"], "line1\nline2\nline3")
+        self.assertEqual(out["response"].count("\r"), 0)
+
+    def test_query_full_with_unknown_transform_logs_warning(self):
+        """Unknown transform names should be logged but not fail."""
+        worker = _make_worker_with_mock([b"hello\r\n"])
+        # Request unknown transform; should complete without modifying output.
+        out = worker.query_full("test", 500, transform_names=["unknown_xform"])
+        self.assertEqual(out["response"], "hello")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

@@ -57,17 +57,50 @@ class TransformCRLF(LineTransform):
 
 
 class TransformHexDump(LineTransform):
-    """Show non-printable characters as hex codes."""
+    """True hex dump: every non-printable byte shown as [0xNN], no exceptions.
+
+    Use this when you want to see exactly what the device sent — LF, CR, tab,
+    ESC and all. For a more readable view that keeps line layout, use 'safe'
+    or 'visualize-controls'.
+    """
 
     def transform(self, text: str) -> str:
-        """Replace control characters with [0xNN] hex notation."""
         result = []
         for c in text:
-            # Keep printable ASCII and newlines
-            if 32 <= ord(c) <= 126 or c in "\n\t":
+            if 32 <= ord(c) <= 126:
                 result.append(c)
             else:
                 result.append(f"[0x{ord(c):02x}]")
+        return "".join(result)
+
+
+class TransformSafe(LineTransform):
+    """cat -v style: make bytes safe to display in a terminal without side effects.
+
+    Replaces control bytes with caret notation (^G for bell, ^[ for ESC, etc.)
+    and high bytes with M- prefix, so nothing rings the bell, moves the cursor,
+    or otherwise drives the terminal. Keeps \\n and \\t literal so line layout
+    and indentation are preserved.
+    """
+
+    def transform(self, text: str) -> str:
+        result = []
+        for c in text:
+            o = ord(c)
+            if c in "\n\t":
+                result.append(c)
+            elif 32 <= o <= 126:
+                result.append(c)
+            elif o < 32:
+                result.append("^" + chr(o + 64))  # 0x07 -> ^G, 0x1b -> ^[
+            elif o == 0x7F:
+                result.append("^?")
+            elif o < 0xA0:
+                # High control range 0x80-0x9F → M-^X
+                result.append("M-^" + chr((o - 0x80) + 64))
+            else:
+                # Printable high byte 0xA0-0xFF → M-x
+                result.append("M-" + chr(o - 0x80))
         return "".join(result)
 
 
@@ -90,6 +123,7 @@ class TransformVisualizeControls(LineTransform):
 LINE_TRANSFORMS = {
     "crlf": TransformCRLF,
     "hex": TransformHexDump,
+    "safe": TransformSafe,
     "visualize-controls": TransformVisualizeControls,
 }
 
