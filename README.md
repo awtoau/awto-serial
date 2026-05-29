@@ -363,7 +363,8 @@ The daemon probes candidate rates fastest-first and selects the first that retur
 
 ## Code Style
 
-See [CODING_STYLE.md](CODING_STYLE.md) for conventions used across all awto-au Python repositories.
+See the [Python coding style guide](https://github.com/awto-au/awto-dan/blob/main/python/python-coding-style.md)
+(canonical copy in `awto-dan`) for conventions used across all awto-au Python repositories.
 
 ---
 
