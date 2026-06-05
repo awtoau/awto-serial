@@ -46,7 +46,19 @@ from protocol import (
     recv_response,
     send_request,
 )
-from serial_daemon import SerialWorker, handle_client, _send, _make_stderr_formatter
+from types import SimpleNamespace
+
+from serial_daemon import (
+    SerialWorker,
+    handle_client,
+    _send,
+    _make_stderr_formatter,
+    discover,
+    list_candidate_ports,
+    make_ascii_probe,
+    _serial_set_line,
+    _serial_pulse_line,
+)
 
 logging.basicConfig(
     level=logging.WARNING,   # keep test output clean
@@ -750,6 +762,250 @@ class TestDetection(unittest.TestCase):
         worker = _make_worker_with_mock([b"line1\rline2\r"])
         worker._eol = "lf"
         self.assertEqual(worker.detect_eol(probe="?", timeout_ms=50), "cr")
+
+
+# ---------------------------------------------------------------------------
+# Layer 4c — Device discovery (mocked serial.Serial + comports)
+# ---------------------------------------------------------------------------
+
+def _fake_comport(device, vid=None, pid=None):
+    """Minimal stand-in for a pyserial ListPortInfo."""
+    return SimpleNamespace(
+        device=device, vid=vid, pid=pid, description="", hwid="",
+        serial_number="", manufacturer="", product="",
+    )
+
+
+def _fake_serial_factory(open_error=None):
+    """Return a callable that mimics serial.Serial(...) and yields a MagicMock port.
+
+    The mock honours attribute get/set, so a probe can read ``ser.baudrate`` /
+    ``ser.dtr`` exactly as it would against a real port. *open_error*, if set, is
+    raised from the constructor to simulate an unopenable device.
+    """
+    def _factory(port, baudrate=None, timeout=None, write_timeout=None):
+        if open_error is not None:
+            raise open_error
+        m = MagicMock()
+        m.is_open = True
+        m.port = port
+        m.baudrate = baudrate
+        m.timeout = timeout
+        m.dtr = False
+        m.rts = False
+        return m
+    return _factory
+
+
+class _LineRecorder:
+    """Records the sequence of DTR/RTS level changes for line-control tests."""
+
+    def __init__(self):
+        self.events = []
+        self._dtr = False
+        self._rts = False
+
+    @property
+    def dtr(self):
+        return self._dtr
+
+    @dtr.setter
+    def dtr(self, value):
+        self._dtr = value
+        self.events.append(("dtr", value))
+
+    @property
+    def rts(self):
+        return self._rts
+
+    @rts.setter
+    def rts(self, value):
+        self._rts = value
+        self.events.append(("rts", value))
+
+
+class TestDiscovery(unittest.TestCase):
+
+    # --- candidate-port identification (identify before open) ---------------
+
+    def test_list_candidate_ports_filters_by_vid(self):
+        ports = [
+            _fake_comport("/dev/ttyUSB0", vid=0x1A86, pid=0x7523),  # CH340 target
+            _fake_comport("/dev/ttyACM0", vid=0x0483, pid=0x3748),  # ST-Link (skip)
+            _fake_comport("/dev/ttyACM1", vid=None, pid=None),      # unknown (skip)
+        ]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            self.assertEqual(list_candidate_ports({0x1A86}), ["/dev/ttyUSB0"])
+
+    def test_list_candidate_ports_ranks_usb_first_when_unfiltered(self):
+        ports = [
+            _fake_comport("/dev/ttyACM1", vid=None),
+            _fake_comport("/dev/ttyUSB0", vid=0x1A86),
+            _fake_comport("/dev/ttyACM0", vid=0x0483),
+        ]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            # ttyUSB outranks ttyACM; ACM ties broken by device name.
+            self.assertEqual(
+                list_candidate_ports(None),
+                ["/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyACM1"],
+            )
+
+    # --- present / absent port ----------------------------------------------
+
+    def test_discover_finds_present_port(self):
+        ports = [_fake_comport("/dev/ttyUSB0", vid=0x1A86, pid=0x7523)]
+        probe = lambda ser: {"model": "RD6024"} if ser.baudrate == 115_200 else None
+        with patch("serial.tools.list_ports.comports", return_value=ports), \
+             patch("serial.Serial", side_effect=_fake_serial_factory()):
+            result = discover(
+                probe=probe, vid_allowlist={0x1A86},
+                bauds=[2_480_000, 115_200], timeout_s=0.05, max_scan_s=2.0,
+            )
+        self.assertEqual(result["found_count"], 1)
+        self.assertEqual(result["ports_scanned"], ["/dev/ttyUSB0"])
+        found = result["found"][0]
+        self.assertEqual(found["port"], "/dev/ttyUSB0")
+        self.assertEqual(found["baud"], 115_200)
+        self.assertEqual(found["identity"], {"model": "RD6024"})
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["skipped"], [])
+
+    def test_discover_absent_port_never_opens_non_candidate(self):
+        ports = [_fake_comport("/dev/ttyACM0", vid=0x0483, pid=0x3748)]  # ST-Link only
+        probe = MagicMock(return_value={"model": "X"})  # must never be called
+        serial_ctor = MagicMock(side_effect=_fake_serial_factory())
+        with patch("serial.tools.list_ports.comports", return_value=ports), \
+             patch("serial.Serial", serial_ctor):
+            result = discover(probe=probe, vid_allowlist={0x1A86})
+        self.assertEqual(result["found_count"], 0)
+        self.assertEqual(result["ports_scanned"], [])
+        serial_ctor.assert_not_called()  # identify-before-open: nothing opened
+        probe.assert_not_called()
+
+    # --- baud scanning -------------------------------------------------------
+
+    def test_discover_baud_scan_tries_fastest_first(self):
+        ports = [_fake_comport("/dev/ttyUSB0", vid=0x1A86)]
+        seen_bauds = []
+
+        def probe(ser):
+            seen_bauds.append(ser.baudrate)
+            return {"ok": True} if ser.baudrate == 115_200 else None
+
+        with patch("serial.tools.list_ports.comports", return_value=ports), \
+             patch("serial.Serial", side_effect=_fake_serial_factory()):
+            result = discover(
+                probe=probe, vid_allowlist={0x1A86},
+                bauds=[2_480_000, 115_200, 9_600], timeout_s=0.05,
+            )
+        self.assertEqual(result["found_count"], 1)
+        self.assertEqual(result["found"][0]["baud"], 115_200)
+        # fastest-first order, and it stopped at the first hit (no 9600 probe)
+        self.assertEqual(seen_bauds, [2_480_000, 115_200])
+
+    # --- DTR probing ---------------------------------------------------------
+
+    def test_discover_applies_dtr_high_before_probe(self):
+        ports = [_fake_comport("/dev/ttyUSB0", vid=0x1A86)]
+        # probe accepts only if DTR was asserted high before it ran
+        probe = lambda ser: {"ok": True} if ser.dtr is True else None
+        with patch("serial.tools.list_ports.comports", return_value=ports), \
+             patch("serial.Serial", side_effect=_fake_serial_factory()):
+            result = discover(
+                probe=probe, vid_allowlist={0x1A86},
+                bauds=[115_200], dtr="high", timeout_s=0.05,
+            )
+        self.assertEqual(result["found_count"], 1)
+
+    # --- time budget ---------------------------------------------------------
+
+    def test_discover_budget_marks_slow_port_skipped(self):
+        ports = [_fake_comport("/dev/ttyUSB0", vid=0x1A86)]
+        release = threading.Event()
+
+        def probe(ser):
+            # Block past the scan budget; released in finally so the daemon
+            # thread unwinds cleanly after the assertions.
+            release.wait()
+            return {"ok": True}
+
+        try:
+            with patch("serial.tools.list_ports.comports", return_value=ports), \
+                 patch("serial.Serial", side_effect=_fake_serial_factory()):
+                # 50 ms budget — the timing IS the thing under test here.
+                result = discover(
+                    probe=probe, vid_allowlist={0x1A86},
+                    bauds=[115_200], timeout_s=0.05, max_scan_s=0.05,
+                )
+            self.assertTrue(result["timed_out"])
+            self.assertEqual(result["found_count"], 0)
+            self.assertEqual(len(result["skipped"]), 1)
+            self.assertEqual(result["skipped"][0]["port"], "/dev/ttyUSB0")
+        finally:
+            release.set()
+
+    # --- open failure --------------------------------------------------------
+
+    def test_discover_records_open_failure(self):
+        import serial as _serial
+        ports = [_fake_comport("/dev/ttyUSB0", vid=0x1A86)]
+        factory = _fake_serial_factory(open_error=_serial.SerialException("busy"))
+        probe = MagicMock(return_value={"ok": True})
+        with patch("serial.tools.list_ports.comports", return_value=ports), \
+             patch("serial.Serial", side_effect=factory):
+            result = discover(
+                probe=probe, vid_allowlist={0x1A86},
+                bauds=[115_200], timeout_s=0.05, include_errors=True,
+            )
+        self.assertEqual(result["found_count"], 0)
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("open failed", result["errors"][0]["error"])
+        probe.assert_not_called()
+
+    def test_discover_rejects_bad_args(self):
+        with self.assertRaises(ValueError):
+            discover(probe=None)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            discover(probe=lambda ser: None, dtr="sideways")
+        with self.assertRaises(ValueError):
+            discover(probe=lambda ser: None, max_scan_s=0)
+
+    # --- generic ASCII probe (composes detect_baud's scoring) ----------------
+
+    def test_make_ascii_probe_accepts_readable_ascii(self):
+        ser = MagicMock()
+        ser.timeout = 0.05
+        ser.read.side_effect = [b"READY v1.0\n", b""]
+        identity = make_ascii_probe("?")(ser)
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity["probe"], "ascii")
+        ser.write.assert_called_once_with(b"?\n")
+
+    def test_make_ascii_probe_rejects_binary_garbage(self):
+        ser = MagicMock()
+        ser.timeout = 0.05
+        # Trailing \n ends the read early; the bytes still score near-zero ASCII.
+        ser.read.side_effect = [b"\xff\xfe\x00\x01\n", b""]
+        self.assertIsNone(make_ascii_probe("?")(ser))
+
+    # --- shared DTR helpers (also used by SerialWorker.set_line/pulse_line) --
+
+    def test_serial_set_line_toggle(self):
+        rec = _LineRecorder()
+        _serial_set_line(rec, "dtr", "high")
+        _serial_set_line(rec, "dtr", "toggle")
+        self.assertEqual(rec.events, [("dtr", True), ("dtr", False)])
+        with self.assertRaises(ValueError):
+            _serial_set_line(rec, "dtr", "sideways")
+
+    def test_serial_pulse_line_high_then_low(self):
+        rec = _LineRecorder()
+        # patch sleep so the test does not actually hold the line for 5 ms
+        with patch("serial_daemon.time.sleep") as sleep_mock:
+            _serial_pulse_line(rec, "dtr", duration_ms=5)
+        self.assertEqual(rec.events, [("dtr", True), ("dtr", False)])
+        sleep_mock.assert_called_once_with(0.005)
 
 
 # ---------------------------------------------------------------------------

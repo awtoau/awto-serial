@@ -361,6 +361,27 @@ The daemon probes candidate rates fastest-first and selects the first that retur
 
 ---
 
+## Device Discovery
+
+`serial_daemon.discover()` is a generic, device-agnostic primitive for finding
+serial devices: it identifies candidate ports by USB VID **before** opening
+anything, then probes them in parallel (one owner thread per port) across a baud
+sweep, with optional DTR control and a hard time budget. Device repos pass a
+device-specific `probe` callback (Modbus identity read, SCPI `*IDN?`, …) plus a
+VID allowlist; everything else is shared.
+
+```python
+from serial_daemon import discover, make_ascii_probe
+
+result = discover(probe=make_ascii_probe("?"), vid_allowlist={0x1A86})
+# -> {found:[{port, baud, probe_ms, identity}], skipped, timed_out, ...}
+```
+
+See [docs/DISCOVERY.md](docs/DISCOVERY.md) for the API, the one-thread-per-port
+rule, and the measured contention proof behind it.
+
+---
+
 ## Code Style
 
 See the [Python coding style guide](https://github.com/awto-au/awto-dan/blob/main/python/python-coding-style.md)

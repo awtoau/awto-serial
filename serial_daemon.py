@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Any, Callable
 import serial
 import serial.tools.list_ports
 
@@ -212,6 +213,53 @@ def _setup_logging(ident: str, level_name: str) -> None:
     stderr = logging.StreamHandler(sys.stderr)
     stderr.setFormatter(_make_stderr_formatter(ident, sys.stderr))
     root.addHandler(stderr)
+
+
+# ---------------------------------------------------------------------------
+# DTR / RTS line control (shared by SerialWorker and discover())
+# ---------------------------------------------------------------------------
+
+def _serial_set_line(ser: serial.Serial, line: str, state: str) -> None:
+    """Drive DTR or RTS on an open serial port. state: 'high'|'low'|'toggle'.
+
+    Free helper so both SerialWorker.set_line and discover()'s DTR probing
+    drive the modem line through one implementation. Caller holds any lock and
+    guarantees the port is open.
+    """
+    line = line.lower()
+    state = state.lower()
+    if line not in ("dtr", "rts"):
+        raise ValueError(f"line must be 'dtr' or 'rts', got {line!r}")
+    if state not in ("high", "low", "toggle"):
+        raise ValueError(f"state must be 'high'|'low'|'toggle', got {state!r}")
+    current = ser.dtr if line == "dtr" else ser.rts
+    new_val = (not current) if state == "toggle" else (state == "high")
+    if line == "dtr":
+        ser.dtr = new_val
+    else:
+        ser.rts = new_val
+
+
+def _serial_pulse_line(ser: serial.Serial, line: str, duration_ms: int = 100) -> None:
+    """Pulse DTR or RTS: assert high, hold *duration_ms*, then low.
+
+    The hold is a genuine hardware requirement, not an arbitrary wait: many
+    USB-serial adapters wire DTR/RTS to the target's reset/boot pins, and the
+    MCU needs the line held for a bounded window to register the level. 100 ms
+    is the long-standing default (matches esptool's reset pulse and the prior
+    pulse_line default); callers tune it per adapter.
+    """
+    line = line.lower()
+    if line not in ("dtr", "rts"):
+        raise ValueError(f"line must be 'dtr' or 'rts', got {line!r}")
+    if line == "dtr":
+        ser.dtr = True
+        time.sleep(duration_ms / 1000.0)
+        ser.dtr = False
+    else:
+        ser.rts = True
+        time.sleep(duration_ms / 1000.0)
+        ser.rts = False
 
 
 # ---------------------------------------------------------------------------
@@ -768,22 +816,11 @@ class SerialWorker:
     # ------------------------------------------------------------------
     def set_line(self, line: str, state: str) -> None:
         """Set DTR or RTS high/low/toggle.  line: 'dtr'|'rts', state: 'high'|'low'|'toggle'."""
-        line = line.lower()
-        state = state.lower()
-        if line not in ("dtr", "rts"):
-            raise ValueError(f"line must be 'dtr' or 'rts', got {line!r}")
         with self._lock:
             if self._ser is None or not self._ser.is_open:
                 raise IOError("serial port not open")
-            if line == "dtr":
-                current = self._ser.dtr
-                new_val = (not current) if state == "toggle" else (state == "high")
-                self._ser.dtr = new_val
-            else:
-                current = self._ser.rts
-                new_val = (not current) if state == "toggle" else (state == "high")
-                self._ser.rts = new_val
-        log.info("set_line: %s=%s", line, state)
+            _serial_set_line(self._ser, line, state)
+        log.info("set_line: %s=%s", line.lower(), state.lower())
 
     def send_break(self, duration_ms: int = 250) -> None:
         with self._lock:
@@ -794,21 +831,11 @@ class SerialWorker:
 
     def pulse_line(self, line: str, duration_ms: int = 100) -> None:
         """Pulse DTR or RTS: assert high, wait duration_ms, then low."""
-        line = line.lower()
-        if line not in ("dtr", "rts"):
-            raise ValueError(f"line must be 'dtr' or 'rts', got {line!r}")
         with self._lock:
             if self._ser is None or not self._ser.is_open:
                 raise IOError("serial port not open")
-            if line == "dtr":
-                self._ser.dtr = True
-                time.sleep(duration_ms / 1000.0)
-                self._ser.dtr = False
-            else:
-                self._ser.rts = True
-                time.sleep(duration_ms / 1000.0)
-                self._ser.rts = False
-        log.info("pulse_line: %s %d ms", line, duration_ms)
+            _serial_pulse_line(self._ser, line, duration_ms)
+        log.info("pulse_line: %s %d ms", line.lower(), duration_ms)
 
     # ------------------------------------------------------------------
     # Background RX reader thread
@@ -1013,6 +1040,304 @@ def _ascii_score(s: str) -> float:
         return 0.0
     good = sum(1 for c in s if 32 <= ord(c) < 127 or c in "\r\n\t")
     return good / len(s)
+
+
+# ---------------------------------------------------------------------------
+# Device discovery
+# ---------------------------------------------------------------------------
+# A generic, device-agnostic discovery primitive. The hard-won lessons baked in
+# here — identify-before-open, one-owner-thread-per-port, a hard time budget,
+# baud scanning and DTR probing — are generic serial concerns, so every device
+# repo (riden, rigol, can, hantek, …) gets correct discovery for free by passing
+# a device-specific probe callback + VID allowlist. See docs/DISCOVERY.md for
+# the one-thread-per-port rule and the measured contention proof behind it.
+
+DISCOVERY_DEFAULT_MAX_WORKERS = 8
+
+
+def _port_type_score(device: str) -> int:
+    """Rank a serial device path by how likely it is a real USB-serial target.
+
+    ttyUSB* (FTDI/CP210x/CH34x bridge) outscores ttyACM*/COM*/rfcomm*, which
+    outscore anything else. This only ORDERS probing; the VID allowlist does the
+    actual filtering.
+    """
+    if "ttyUSB" in device:
+        return 2
+    if "ttyACM" in device or "rfcomm" in device or device.upper().startswith("COM"):
+        return 1
+    return 0
+
+
+def list_candidate_ports(vid_allowlist: set[int] | None = None) -> list[str]:
+    """Serial ports worth probing, best-first, identified by USB VID — NOT by opening.
+
+    With *vid_allowlist* (e.g. ``{0x1A86}`` for CH34x), only ports whose USB VID
+    is in the set are returned. This is the core "identify before open" win: it
+    skips ST-Link / Pico-CMSIS-DAP / ESP32-JTAG CDC-ACM devices that are not the
+    target and can hang for tens of seconds on a blind ``open()``/probe. With
+    *vid_allowlist* None, every detected serial port is returned (slower, may
+    touch debug adapters) — pass an allowlist whenever you can.
+
+    Ordering: allowlisted VID first, then port-type score, then device name for
+    a stable order so the most likely ports are probed before the time budget is
+    exhausted.
+    """
+    scored: list[tuple[int, str]] = []
+    for p in serial.tools.list_ports.comports():
+        if vid_allowlist is not None and p.vid not in vid_allowlist:
+            continue
+        score = _port_type_score(p.device)
+        if vid_allowlist is not None:
+            score += 10  # an allowlisted VID always ranks above generic ordering
+        scored.append((score, p.device))
+    scored.sort(key=lambda sd: (-sd[0], sd[1]))
+    return [dev for _score, dev in scored]
+
+
+def make_ascii_probe(
+    probe_str: str = "?",
+    min_score: float = 0.8,
+    min_bytes: int = 4,
+) -> Callable[[serial.Serial], dict | None]:
+    """Build a generic probe callback that accepts a port returning readable ASCII.
+
+    This is the device-neutral probe — the same ASCII-scoring rule as
+    ``SerialWorker.detect_baud`` (>= *min_bytes* bytes and >= *min_score*
+    printable), reused via ``_ascii_score``. Devices with a real identity
+    handshake (Modbus identity read, SCPI ``*IDN?``, …) should pass their own
+    probe instead.
+    """
+    def _probe(ser: serial.Serial) -> dict | None:
+        try:
+            ser.reset_input_buffer()
+            ser.write(probe_str.encode() + b"\n")
+            ser.flush()
+        except (serial.SerialException, OSError):
+            return None
+        deadline = time.monotonic() + (ser.timeout or 0.2)
+        buf = bytearray()
+        while time.monotonic() < deadline:
+            chunk = ser.read(4096)
+            if chunk:
+                buf.extend(chunk)
+                if b"\n" in buf or b"\r" in buf:
+                    break
+        resp = bytes(buf).decode(errors="replace").strip()
+        score = _ascii_score(resp)
+        if score >= min_score and len(resp) >= min_bytes:
+            return {"probe": "ascii", "score": round(score, 3), "sample": resp[:80]}
+        return None
+    return _probe
+
+
+def discover(
+    *,
+    probe: Callable[[serial.Serial], dict | None],
+    vid_allowlist: set[int] | None = None,
+    bauds: list[int] | None = None,
+    dtr: str | None = None,
+    dtr_pulse_ms: int = 100,
+    timeout_s: float = 0.2,
+    max_scan_s: float = 5.0,
+    max_workers: int = DISCOVERY_DEFAULT_MAX_WORKERS,
+    ports: list[str] | None = None,
+    include_errors: bool = False,
+) -> dict[str, Any]:
+    """Discover serial devices: identify by USB ID, then probe candidates in parallel.
+
+    Device-agnostic. The caller supplies the only two device-specific pieces:
+
+      * *probe* — ``Callable[[serial.Serial], dict | None]``. Receives an OPEN
+        serial port (already at the baud under test, with DTR applied) and does
+        its own I/O — a Modbus identity read, a ``*IDN?`` query, whatever.
+        Returns an identity dict on a match, or ``None``. It MUST NOT open its
+        own port (see rule 2).
+      * *vid_allowlist* — USB VIDs to restrict probing to, e.g. ``{0x1A86}``.
+
+    The generic concerns handled here, each proven the hard way:
+
+    1. **Identify-before-open** — candidate ports come from
+       :func:`list_candidate_ports` (VID filter + type score), so non-target
+       CDC-ACM debug adapters are never opened. (Override with *ports* to probe
+       an explicit list.)
+    2. **One owner thread per port** — the scan fans out across *ports* (bounded
+       by *max_workers* via a semaphore) but probes a port's bauds SERIALLY
+       inside that port's single daemon thread. Opening one serial device from
+       two threads at once corrupts every reader; see docs/DISCOVERY.md. Daemon
+       threads are deliberate: a serial ``open()`` can block past the budget and
+       a non-daemon worker would keep the process alive at interpreter exit.
+    3. **Bounded scan + hard budget** — *max_scan_s* caps wall-clock. Any port
+       whose thread has not finished by the deadline is reported under
+       ``skipped`` (no silent truncation) and its daemon thread abandoned.
+    4. **Baud scanning** — each port is tried across *bauds* (default
+       :data:`CANDIDATE_BAUDS`, fastest first); the generalisation of
+       ``detect_baud``, except the *probe* callback is the oracle instead of an
+       ASCII heuristic. First baud the probe accepts wins (one device per port).
+    5. **DTR probing** — *dtr* (``'high'``|``'low'``|``'pulse'``) drives DTR
+       before each probe via the same helpers as ``SerialWorker.set_line`` /
+       ``pulse_line``; *dtr_pulse_ms* is the pulse hold.
+    6. **High-resolution timing** — per-probe ms (``perf_counter``) at DEBUG,
+       totals at INFO.
+
+    Returns a dict: ``ports_scanned``, ``bauds_scanned``, ``found`` (list of
+    ``{port, baud, probe_ms, identity}``), ``found_count``, ``errors`` (only when
+    *include_errors*), ``skipped``, ``timed_out``, ``max_scan_s``, ``scan_ms``.
+    """
+    if not callable(probe):
+        raise ValueError("probe must be a callable: (serial.Serial) -> dict | None")
+    if timeout_s <= 0:
+        raise ValueError("timeout_s must be > 0")
+    if max_scan_s <= 0:
+        raise ValueError("max_scan_s must be > 0")
+    if dtr is not None and dtr not in ("high", "low", "pulse"):
+        raise ValueError("dtr must be one of 'high'|'low'|'pulse' or None")
+    bauds = list(bauds) if bauds else list(CANDIDATE_BAUDS)
+
+    if ports is None:
+        ports = list_candidate_ports(vid_allowlist)
+
+    found: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    timed_out = False
+
+    log.info(
+        "discover: %d port(s) × %d baud(s), timeout=%.0fms dtr=%s budget=%.1fs, parallel by port",
+        len(ports), len(bauds), timeout_s * 1000, dtr, max_scan_s,
+    )
+
+    if not ports:
+        return {
+            "ports_scanned": [], "bauds_scanned": bauds,
+            "found": [], "found_count": 0,
+            "errors": [], "skipped": [], "timed_out": False,
+            "max_scan_s": float(max_scan_s), "scan_ms": 0.0,
+        }
+
+    def _apply_dtr(ser: serial.Serial) -> None:
+        if dtr is None:
+            return
+        if dtr == "pulse":
+            _serial_pulse_line(ser, "dtr", dtr_pulse_ms)
+        else:
+            _serial_set_line(ser, "dtr", dtr)
+
+    def _scan_port(port: str) -> dict[str, Any]:
+        """Probe all bauds on ONE port, serially, in this port's single thread.
+
+        Parallelism is across ports, never within a port: opening the same
+        serial device from multiple threads at once corrupts every reader, so
+        each port has exactly one owner thread that tries its bauds in sequence.
+        The port is opened exactly once (the costly, possibly-blocking step);
+        each baud is a live ``ser.baudrate =`` reconfigure. Stops at the first
+        baud the probe accepts (one device per port). Times each probe at the
+        highest resolution available (perf_counter).
+        """
+        port_found: list[dict[str, Any]] = []
+        port_errors: list[dict[str, Any]] = []
+        try:
+            ser = serial.Serial(port, baudrate=bauds[0], timeout=timeout_s,
+                                write_timeout=timeout_s)
+        except (serial.SerialException, OSError) as exc:
+            log.debug("discover: open %s failed: %s", port, exc)
+            port_errors.append({"port": port, "error": f"open failed: {exc}"})
+            return {"found": port_found, "errors": port_errors}
+        try:
+            for baud in bauds:
+                t0 = time.perf_counter()
+                try:
+                    ser.baudrate = baud
+                except (serial.SerialException, OSError) as exc:
+                    log.debug("discover: baud %d unsupported on %s: %s", baud, port, exc)
+                    continue
+                try:
+                    ser.reset_input_buffer()
+                    ser.reset_output_buffer()
+                    _apply_dtr(ser)
+                    result = probe(ser)
+                except Exception as exc:
+                    ms = (time.perf_counter() - t0) * 1000.0
+                    log.debug("discover: probe %s @ %d → error in %.3fms (%s)",
+                              port, baud, ms, exc)
+                    port_errors.append({"port": port, "baud": int(baud),
+                                        "error": str(exc), "probe_ms": round(ms, 3)})
+                    continue
+                ms = (time.perf_counter() - t0) * 1000.0
+                if result:
+                    log.debug("discover: probe %s @ %d → FOUND in %.3fms", port, baud, ms)
+                    port_found.append({"port": port, "baud": int(baud),
+                                       "probe_ms": round(ms, 3), "identity": result})
+                    break  # one device per port
+                log.debug("discover: probe %s @ %d → none in %.3fms", port, baud, ms)
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+        return {"found": port_found, "errors": port_errors}
+
+    # Fan out across PORTS (bounded fan-out per the coding style). One DAEMON
+    # thread per port, capped by a semaphore — never multiple threads on the
+    # same device. Daemon threads are deliberate: a serial open() can block past
+    # the budget (the read timeout does not bound open()), and a non-daemon
+    # worker with a stuck open() would keep the process alive at interpreter
+    # exit even after we have the result.
+    workers = max(1, min(int(max_workers), len(ports)))
+    slots = threading.Semaphore(workers)
+    results_lock = threading.Lock()
+    results: dict[str, dict[str, Any]] = {}
+
+    def _worker(port: str) -> None:
+        with slots:
+            res = _scan_port(port)
+        with results_lock:
+            results[port] = res
+
+    t_start = time.perf_counter()
+    threads: list[tuple[str, threading.Thread]] = []
+    for port in ports:
+        t = threading.Thread(target=_worker, args=(port,), daemon=True,
+                            name=f"awto-discover-{port}")
+        t.start()
+        threads.append((port, t))
+
+    # Join each port's thread within the remaining budget. A port whose thread
+    # has not finished by the deadline is recorded as skipped and its daemon
+    # thread abandoned — no silent truncation, no hang.
+    deadline = time.monotonic() + float(max_scan_s)
+    for port, t in threads:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            t.join(timeout=remaining)
+        if t.is_alive():
+            timed_out = True
+            skipped.append({"port": port, "reason": "scan budget exceeded"})
+
+    with results_lock:
+        for port, _t in threads:
+            res = results.get(port)
+            if res is None:
+                continue  # already counted as skipped above
+            found.extend(res["found"])
+            if include_errors:
+                errors.extend(res["errors"])
+
+    total_ms = (time.perf_counter() - t_start) * 1000.0
+    log.info("discover: %d found, %d skipped (timed_out=%s) in %.3fms",
+             len(found), len(skipped), timed_out, total_ms)
+
+    return {
+        "ports_scanned": ports,
+        "bauds_scanned": bauds,
+        "found": found,
+        "found_count": len(found),
+        "errors": errors if include_errors else [],
+        "skipped": skipped,
+        "timed_out": timed_out,
+        "max_scan_s": float(max_scan_s),
+        "scan_ms": round(total_ms, 3),
+    }
 
 
 def _run_exec_argv(argv: list[str], timeout_ms: int, max_output_bytes: int) -> dict:
